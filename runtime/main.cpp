@@ -5,6 +5,7 @@
 #include <cstring>
 #include "memory.h"
 #include "loader.h"
+#include "cpu/guest_context.h"
 
 // Layout do bloco da thread, igual ao do Unleashed Recompiled (cpu/guest_thread.cpp).
 constexpr uint32_t PCR_SIZE = 0xAB0;
@@ -35,6 +36,7 @@ static void InitThreadContext(PPCContext& ctx, uint32_t cpuNumber, uint32_t thre
     ctx.r1.u64 = teb + TEB_SIZE + STACK_SIZE;               // topo da pilha
     ctx.r13.u64 = block;                                    // r13 = PCR
     ctx.fpscr.loadFromHost();
+    SetPPCContext(ctx);
 }
 
 int main(int argc, char** argv)

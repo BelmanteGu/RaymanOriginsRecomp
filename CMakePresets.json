@@ -4,7 +4,7 @@
     {
       "name": "macos-llvm",
       "displayName": "macOS arm64 — LLVM 23 (tools/llvm)",
-      "description": "Clang 18+ exigido pelo XenonRecomp. Usa lld: o /usr/bin/ld do sistema aborta ao carregar o libLTO do LLVM 23.",
+      "description": "Clang 18+ exigido pelo XenonRecomp. Usa lld (o /usr/bin/ld do sistema aborta ao carregar o libLTO do LLVM 23) e os headers da libc++ do SDK: os do LLVM 23 exigem símbolos que a libc++ do macOS 14 não tem, e linkar a libc++ do LLVM mistura duas libc++ no processo.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
@@ -12,7 +12,9 @@
         "CMAKE_C_COMPILER": "${sourceDir}/tools/llvm/LLVM-23.1.2-macOS-ARM64/bin/clang",
         "CMAKE_CXX_COMPILER": "${sourceDir}/tools/llvm/LLVM-23.1.2-macOS-ARM64/bin/clang++",
         "CMAKE_LINKER_TYPE": "LLD",
-        "CMAKE_OSX_SYSROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+        "CMAKE_OSX_SYSROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+        "CMAKE_C_FLAGS": "-fuse-ld=lld -Wno-unused-command-line-argument",
+        "CMAKE_CXX_FLAGS": "-fuse-ld=lld -Wno-unused-command-line-argument -nostdinc++ -isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"
       }
     }
   ],
