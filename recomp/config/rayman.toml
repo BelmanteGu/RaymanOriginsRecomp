@@ -1,0 +1,105 @@
+# Rayman Origins (Xbox 360, RYOGNS, PT-BR) — configuração do XenonRecomp.
+# Caminhos relativos a este arquivo.
+
+[main]
+file_path = "../../private/game/default.xex"
+out_directory_path = "../ppc"
+switch_table_file_path = "rayman_switch_tables.toml"
+# Sem title update (nenhum XEXP no dump), então sem patch_file_path.
+
+# Otimizações: manter desligadas até ter uma recompilação funcionando.
+skip_lr = false
+skip_msr = false
+ctr_as_local = false
+xer_as_local = false
+reserved_as_local = false
+cr_as_local = false
+non_argument_as_local = false
+non_volatile_as_local = false
+
+# Funções save/restore de registradores — achadas por padrão de bytes
+# (tools/diag). Ocorrência única cada; distâncias batem com as do SWA.
+restgprlr_14_address = 0x82540C40
+savegprlr_14_address = 0x82540BF0
+restfpr_14_address = 0x825423CC
+savefpr_14_address = 0x82542380
+restvmx_14_address = 0x827DAC98
+savevmx_14_address = 0x827DAA00
+restvmx_64_address = 0x827DAD2C
+savevmx_64_address = 0x827DAA94
+
+# TODO: longjmp_address / setjmp_address (procurar chamadas a RtlUnwind).
+
+# Jump tables: o XenonAnalyse detecta 0 neste binário (compilador reordena
+# lis/addi/rlwinm e intercala nops). Geradas por tools/jumptables (168 tabelas).
+#
+# Limites de função: funções-folha sem .pdata que contêm switch (jump table ou
+# sequência mtctr/bdz) são cortadas pela análise estática do recompilador.
+# Tudo entre os marcadores é regenerado por tools/regen_config.sh.
+# BEGIN functions (gerado)
+functions = [
+    { address = 0x82245DA8, size = 0x80 },
+    { address = 0x8261F338, size = 0x228 },
+    { address = 0x826938A0, size = 0x110 },
+    { address = 0x826F3250, size = 0x128 },
+    { address = 0x826F34A8, size = 0xD0 },
+    { address = 0x82728868, size = 0xE0 },
+    { address = 0x827E5198, size = 0x100 },
+    { address = 0x827F85C8, size = 0xD8 },
+    { address = 0x827FB9B0, size = 0x190 },
+    { address = 0x8290F8B8, size = 0x68 },
+    { address = 0x8290F920, size = 0x68 },
+    { address = 0x8290F988, size = 0x60 },
+    { address = 0x8290F9E8, size = 0x198 },
+    { address = 0x8290FB80, size = 0x170 },
+    { address = 0x8218AE38, size = 0x88 }, # bdz
+    { address = 0x821995A0, size = 0x24C }, # bdz
+    { address = 0x821BE4E8, size = 0x10C }, # bdz
+    { address = 0x821DFDD0, size = 0xC4 }, # bdz
+    { address = 0x8226DC08, size = 0x8C }, # bdz
+    { address = 0x82322060, size = 0x1F8 }, # bdz
+    { address = 0x823A9B08, size = 0x1B4 }, # bdz
+    { address = 0x8241EE48, size = 0x44 }, # bdz
+    { address = 0x82431458, size = 0x278 }, # bdz
+    { address = 0x8245F470, size = 0x60 }, # bdz
+    { address = 0x8246ADB0, size = 0xB8 }, # bdz
+    { address = 0x824B1EF8, size = 0x4D0 }, # bdz
+    { address = 0x824B7040, size = 0x1A8 }, # bdz
+    { address = 0x82508F40, size = 0x1B0 }, # bdz
+    { address = 0x8251D5D0, size = 0x3C }, # bdz
+    { address = 0x8251D610, size = 0x48 }, # bdz
+    { address = 0x8251D980, size = 0x4C }, # bdz
+    { address = 0x8251DB28, size = 0x7C }, # bdz
+    { address = 0x8251DBA8, size = 0x78 }, # bdz
+    { address = 0x825291C0, size = 0x10C }, # bdz
+    { address = 0x82541A20, size = 0xBC }, # bdz
+    { address = 0x82542420, size = 0x488 }, # bdz
+    { address = 0x825428A8, size = 0xA8 }, # bdz
+    { address = 0x8256C668, size = 0x78 }, # bdz
+    { address = 0x8256CED0, size = 0x94 }, # bdz
+    { address = 0x8256CF68, size = 0xA0 }, # bdz
+    { address = 0x8256D538, size = 0x68 }, # bdz
+    { address = 0x825B1FB0, size = 0xE0 }, # bdz
+    { address = 0x825B4BE8, size = 0x12C }, # bdz
+    { address = 0x825C2A48, size = 0x84 }, # bdz
+    { address = 0x825EEF38, size = 0x54 }, # bdz
+    { address = 0x82660930, size = 0xAC }, # bdz
+    { address = 0x826A8868, size = 0x84 }, # bdz
+    { address = 0x826F3378, size = 0x90 }, # bdz
+    { address = 0x826F3578, size = 0x25C }, # bdz
+    { address = 0x826F37D8, size = 0xA4 }, # bdz
+    { address = 0x8271A208, size = 0xC0 }, # bdz
+    { address = 0x8272B980, size = 0x11C }, # bdz
+    { address = 0x8275D7C8, size = 0x34C }, # bdz
+    { address = 0x8275E0F8, size = 0x338 }, # bdz
+    { address = 0x8275E430, size = 0x3C0 }, # bdz
+    { address = 0x82789C40, size = 0x84 }, # bdz
+    { address = 0x827DA970, size = 0x90 }, # bdz
+    { address = 0x827DAF30, size = 0x4C }, # bdz
+    { address = 0x827E8DB8, size = 0x84 }, # bdz
+    { address = 0x827F3540, size = 0xB0 }, # bdz
+    { address = 0x8282E0A8, size = 0x6C }, # bdz
+    { address = 0x828A6DE0, size = 0x78 }, # bdz
+    { address = 0x828DDFD0, size = 0xC0 }, # bdz
+]
+# END functions (gerado)

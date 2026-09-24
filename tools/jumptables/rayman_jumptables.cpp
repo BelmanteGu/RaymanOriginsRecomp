@@ -1,0 +1,465 @@
+// Detector de jump tables para o Rayman Origins (X360).
+//
+// O XenonAnalyse procura sequências contíguas e exatas (calibradas no Sonic
+// Unleashed) e lê operandos por posição fixa. O compilador do Rayman reordena
+// lis/addi/rlwinm e intercala nops, então nada casa. Aqui, para cada bctr,
+// achamos o "cmplwi crN, rIdx, MAX / bgt crN, default" que o guarda e
+// simulamos o bloco até o bctr com um avaliador de registradores mínimo.
+// A ordem das instruções e os nops deixam de importar.
+//
+// Saída: TOML no mesmo formato do XenonAnalyse ([[switch]] base/r/default/labels).
+#include <cstdio>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <vector>
+#include <map>
+#include <set>
+#include <algorithm>
+#include <file.h>
+#include <image.h>
+#include <disasm.h>
+#include <ppc-inst.h>
+
+namespace
+{
+    // Valor simbólico de um registrador dentro do bloco do switch.
+    struct Val
+    {
+        enum Kind { Unknown, Const, Index, Loaded, Target } kind = Unknown;
+        uint32_t c = 0;       // Const: valor; Target: base relativa
+        uint32_t shift = 0;   // Index: escala do índice; Loaded/Target: shift do elemento
+        uint32_t table = 0;   // Loaded/Target: endereço da tabela
+        uint32_t elem = 0;    // Loaded/Target: tamanho do elemento (1, 2, 4)
+        bool relative = false;
+    };
+
+    struct Switch
+    {
+        uint32_t base = 0;
+        uint32_t r = 0;
+        uint32_t def = 0;
+        std::vector<uint32_t> labels;
+        const char* kind = "";
+    };
+
+    uint32_t be32(const uint8_t* p) { return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; }
+    uint32_t be16(const uint8_t* p) { return (p[0] << 8) | p[1]; }
+
+    bool inText(const Section& text, uint32_t a)
+    {
+        return a >= text.base && a < text.base + text.size && (a & 3) == 0;
+    }
+
+    enum class Fail { None, NoGuard, Unsupported, IndexClobbered, BadTable, LabelOutside };
+
+    // Tenta resolver o switch que termina no bctr em bctrAddr.
+    Fail Resolve(const Image& image, const Section& text, uint32_t bctrAddr, Switch& out)
+    {
+        auto insnAt = [&](uint32_t a, ppc_insn& in) {
+            ppc::Disassemble(image.Find(a), a, in);
+            return in.opcode != nullptr;
+        };
+
+        // 1. Guarda: bgt crN, default seguido (para trás) de cmplwi crN, rIdx, MAX.
+        ppc_insn in;
+        uint32_t bgtAddr = 0, cr = 0, def = 0, idx = 0, max = 0;
+        for (int i = 1; i <= 24 && !bgtAddr; ++i)
+        {
+            uint32_t a = bctrAddr - 4 * i;
+            if (!insnAt(a, in)) continue;
+            if (in.opcode->id == PPC_INST_BCTR || in.opcode->id == PPC_INST_BLR)
+                break; // passou do início do bloco
+            if (in.opcode->id == PPC_INST_BGT)
+            {
+                bgtAddr = a;
+                cr = in.operands[0];
+                def = in.operands[1];
+            }
+        }
+        if (!bgtAddr) return Fail::NoGuard;
+
+        uint32_t cmpAddr = 0;
+        // O escalonador pode afastar o cmplwi do bgt (visto: 6 instruções).
+        for (int i = 1; i <= 12 && !cmpAddr; ++i)
+        {
+            if (!insnAt(bgtAddr - 4 * i, in)) continue;
+            if (in.opcode->id == PPC_INST_BLR || in.opcode->id == PPC_INST_BCTR || in.opcode->id == PPC_INST_B)
+                break;
+            if (in.opcode->id == PPC_INST_CMPLWI && in.operands[0] == cr)
+            {
+                idx = in.operands[1];
+                max = in.operands[2];
+                cmpAddr = bgtAddr - 4 * i;
+            }
+        }
+        if (!cmpAddr) return Fail::NoGuard;
+
+        // O índice não pode ser reescrito entre o cmplwi e o bgt.
+        for (uint32_t a = cmpAddr + 4; a < bgtAddr; a += 4)
+        {
+            if (!insnAt(a, in)) return Fail::Unsupported;
+            const char* n = in.opcode->name;
+            if (n[0] == 'f' || !strncmp(n, "lf", 2) || !strncmp(n, "st", 2) || !strncmp(n, "cmp", 3))
+                continue;
+            if (in.operands[0] == idx) return Fail::IndexClobbered;
+        }
+
+        // 2. Simula o bloco entre o bgt e o bctr.
+        Val regs[32];
+        regs[idx].kind = Val::Index;
+
+        // Aliases do índice: "mr rX, rIdx" ou "mr rIdx, rX" logo antes do cmplwi
+        // (ex.: mr r31,r4 / cmplwi r4 / ... rlwinm r0,r31).
+        for (int i = 1; i <= 8; ++i)
+        {
+            if (!insnAt(cmpAddr - 4 * i, in)) continue;
+            if (in.opcode->id == PPC_INST_BLR || in.opcode->id == PPC_INST_BCTR) break;
+            if (in.opcode->id == PPC_INST_MR)
+            {
+                if (in.operands[1] == idx) regs[in.operands[0]].kind = Val::Index;
+                else if (in.operands[0] == idx) regs[in.operands[1]].kind = Val::Index;
+            }
+        }
+        uint32_t ctrReg = UINT32_MAX;
+
+        for (uint32_t a = bgtAddr + 4; a < bctrAddr; a += 4)
+        {
+            if (!insnAt(a, in)) return Fail::Unsupported;
+            const uint32_t* o = in.operands;
+            Val v;
+            switch (in.opcode->id)
+            {
+            case PPC_INST_NOP:
+                continue;
+            case PPC_INST_LIS:
+                v.kind = Val::Const; v.c = o[1] << 16;
+                break;
+            case PPC_INST_LI:
+                v.kind = Val::Const; v.c = o[1];
+                break;
+            case PPC_INST_ADDI:
+                if (regs[o[1]].kind != Val::Const) return Fail::Unsupported;
+                v.kind = Val::Const; v.c = regs[o[1]].c + o[2];
+                break;
+            case PPC_INST_RLWINM:
+            {
+                // Só aceitamos shift-left puro: rlwinm rA, rS, SH, 0, 31-SH.
+                const Val& s = regs[o[1]];
+                uint32_t sh = o[2];
+                if (o[3] != 0 || o[4] != 31 - sh) return Fail::Unsupported;
+                if (s.kind == Val::Index && s.shift == 0) { v = s; v.shift = sh; }
+                else if (s.kind == Val::Loaded && s.shift == 0) { v = s; v.shift = sh; }
+                else return Fail::Unsupported;
+                break;
+            }
+            case PPC_INST_LWZX:
+            case PPC_INST_LHZX:
+            case PPC_INST_LBZX:
+            {
+                uint32_t elem = in.opcode->id == PPC_INST_LWZX ? 4 :
+                                in.opcode->id == PPC_INST_LHZX ? 2 : 1;
+                const Val& ra = regs[o[1]];
+                const Val& rb = regs[o[2]];
+                const Val* tbl = ra.kind == Val::Const ? &ra : rb.kind == Val::Const ? &rb : nullptr;
+                const Val* ix = ra.kind == Val::Index ? &ra : rb.kind == Val::Index ? &rb : nullptr;
+                if (!tbl || !ix || (1u << ix->shift) != elem) return Fail::Unsupported;
+                v.kind = Val::Loaded; v.table = tbl->c; v.elem = elem;
+                break;
+            }
+            case PPC_INST_ADD:
+            {
+                const Val& ra = regs[o[1]];
+                const Val& rb = regs[o[2]];
+                const Val* base = ra.kind == Val::Const ? &ra : rb.kind == Val::Const ? &rb : nullptr;
+                const Val* ld = ra.kind == Val::Loaded ? &ra : rb.kind == Val::Loaded ? &rb : nullptr;
+                if (!base || !ld) return Fail::Unsupported;
+                v = *ld; v.kind = Val::Target; v.relative = true; v.c = base->c;
+                break;
+            }
+            case PPC_INST_MTCTR:
+                ctrReg = o[0];
+                continue;
+            default:
+            {
+                // Instrução não relacionada intercalada pelo escalonador.
+                // Stores, float e compares não escrevem em GPR: ignora.
+                const char* n = in.opcode->name;
+                if (n[0] == 'f' || !strncmp(n, "lf", 2) || !strncmp(n, "st", 2) || !strncmp(n, "cmp", 3))
+                    continue;
+                // O resto: assume que operands[0] é o GPR de destino e o invalida.
+                v.kind = Val::Unknown;
+                break;
+            }
+            }
+
+            // Todas as instruções acima escrevem em operands[0].
+            if (o[0] == idx) return Fail::IndexClobbered;
+            regs[o[0]] = v;
+        }
+
+        if (ctrReg == UINT32_MAX) return Fail::Unsupported;
+        const Val& t = regs[ctrReg];
+
+        // 3. Lê a tabela e calcula os labels.
+        uint32_t count = max + 1;
+        const auto* tbl = static_cast<const uint8_t*>(image.Find(t.table));
+        if (!tbl) return Fail::BadTable;
+
+        out = {};
+        out.base = bgtAddr + 4;
+        out.r = idx;
+        out.def = def;
+        out.labels.reserve(count);
+
+        if (t.kind == Val::Loaded && t.elem == 4 && t.shift == 0)
+        {
+            out.kind = "absolute";
+            for (uint32_t i = 0; i < count; ++i)
+                out.labels.push_back(be32(tbl + 4 * i));
+        }
+        else if (t.kind == Val::Target && t.relative)
+        {
+            out.kind = t.elem == 1 ? (t.shift ? "computed" : "byteoffset") : "shortoffset";
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                uint32_t e = t.elem == 1 ? tbl[i] : t.elem == 2 ? be16(tbl + 2 * i) : be32(tbl + 4 * i);
+                out.labels.push_back(t.c + (e << t.shift));
+            }
+        }
+        else
+        {
+            return Fail::Unsupported;
+        }
+
+        for (uint32_t l : out.labels)
+            if (!inText(text, l)) return Fail::LabelOutside;
+        if (!inText(text, def)) return Fail::LabelOutside;
+
+        return Fail::None;
+    }
+}
+
+int main(int argc, char** argv)
+{
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc < 3)
+    {
+        printf("uso: rayman_jumptables <xex> <saida.toml>\n");
+        return 1;
+    }
+
+    auto file = LoadFile(argv[1]);
+    auto image = Image::ParseImage(file.data(), file.size());
+    const Section* text = image.Find(".text");
+    if (!text) { printf("sem .text\n"); return 1; }
+
+    std::vector<Switch> found;
+    std::map<Fail, int> fails;
+    std::vector<uint32_t> unsupported; // bctr com guarda mas padrão desconhecido
+
+    auto* code = reinterpret_cast<const uint32_t*>(text->data);
+    for (uint32_t i = 0; i < text->size / 4; ++i)
+    {
+        uint32_t a = text->base + 4 * i;
+        ppc_insn in;
+        ppc::Disassemble(&code[i], a, in);
+        if (!in.opcode || in.opcode->id != PPC_INST_BCTR) continue;
+
+        Switch sw;
+        Fail f = Resolve(image, *text, a, sw);
+        if (f == Fail::None) found.push_back(std::move(sw));
+        else
+        {
+            ++fails[f];
+            if (f != Fail::NoGuard) unsupported.push_back(a);
+            else
+            {
+                // Sem guarda: suspeito se houver leitura indexada de tabela logo antes.
+                for (uint32_t k = 1; k <= 10 && k <= i; ++k)
+                {
+                    ppc_insn p;
+                    ppc::Disassemble(&code[i - k], a - 4 * k, p);
+                    if (!p.opcode) continue;
+                    if (p.opcode->id == PPC_INST_BLR || p.opcode->id == PPC_INST_BCTR) break;
+                    if (p.opcode->id == PPC_INST_LWZX || p.opcode->id == PPC_INST_LHZX || p.opcode->id == PPC_INST_LBZX)
+                    {
+                        unsupported.push_back(a);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    std::string out = "# Gerado por tools/jumptables/rayman_jumptables (Rayman Origins X360)\n\n";
+    std::map<std::string, int> kinds;
+    char buf[64];
+    for (const auto& sw : found)
+    {
+        ++kinds[sw.kind];
+        snprintf(buf, sizeof(buf), "# %s\n[[switch]]\n", sw.kind); out += buf;
+        snprintf(buf, sizeof(buf), "base = 0x%X\n", sw.base); out += buf;
+        snprintf(buf, sizeof(buf), "r = %u\n", sw.r); out += buf;
+        snprintf(buf, sizeof(buf), "default = 0x%X\n", sw.def); out += buf;
+        out += "labels = [\n";
+        for (uint32_t l : sw.labels) { snprintf(buf, sizeof(buf), "    0x%X,\n", l); out += buf; }
+        out += "]\n\n";
+    }
+
+    FILE* f = fopen(argv[2], "wb");
+    if (!f) { printf("não consegui abrir %s\n", argv[2]); return 1; }
+    fwrite(out.data(), 1, out.size(), f);
+    fclose(f);
+
+    // Limites de função. O recompilador confia no .pdata; funções-folha sem
+    // .pdata são analisadas estaticamente e cortadas no switch (parece tail
+    // call). Início real = maior início conhecido (.pdata ou alvo de bl) <= base;
+    // fim = próximo início conhecido. Se o .pdata já cobre os labels, nada a fazer.
+    if (argc >= 4)
+    {
+        std::map<uint32_t, uint32_t> pdataFns; // início -> tamanho
+        const Section* pdata = image.Find(".pdata");
+        for (uint32_t off = 0; pdata && off + 8 <= pdata->size; off += 8)
+        {
+            uint32_t begin = be32(pdata->data + off);
+            uint32_t data = be32(pdata->data + off + 4);
+            pdataFns[begin] = ((data >> 8) & 0x3FFFFF) * 4; // FunctionLength (bits 8..29)
+        }
+
+        std::set<uint32_t> starts;
+        for (auto& [b, s] : pdataFns) starts.insert(b);
+        for (uint32_t i = 0; i < text->size / 4; ++i)
+        {
+            uint32_t w = be32(text->data + 4 * i);
+            if ((w >> 26) == 18 && (w & 3) == 1) // bl (não absoluto)
+            {
+                int32_t off = (int32_t)((w & 0x03FFFFFC) << 6) >> 6;
+                uint32_t t = text->base + 4 * i + off;
+                if (inText(*text, t)) starts.insert(t);
+            }
+        }
+
+        std::string fnOut = "functions = [\n";
+        int emitted = 0, covered = 0, broken = 0;
+        std::set<uint32_t> done;
+        for (const auto& sw : found)
+        {
+            auto it = starts.upper_bound(sw.base);
+            uint32_t end = it == starts.end() ? text->base + text->size : *it;
+            --it;
+            uint32_t start = *it;
+
+            uint32_t lo = sw.def, hi = sw.def;
+            for (uint32_t l : sw.labels) { lo = std::min(lo, l); hi = std::max(hi, l); }
+
+            auto pd = pdataFns.find(start);
+            if (pd != pdataFns.end() && lo >= start && hi < start + pd->second) { ++covered; continue; }
+
+            if (lo < start || hi >= end)
+            {
+                printf("  ! switch 0x%X: labels [0x%X,0x%X] fora de [0x%X,0x%X)\n", sw.base, lo, hi, start, end);
+                ++broken;
+                continue;
+            }
+            if (!done.insert(start).second) continue;
+            snprintf(buf, sizeof(buf), "    { address = 0x%X, size = 0x%X },\n", start, end - start);
+            fnOut += buf;
+            ++emitted;
+        }
+        // Endereços de código referenciados como ponteiros nos dados (vtables,
+        // callbacks): são funções reais mesmo sem bl, então não podem ser engolidos.
+        std::set<uint32_t> dataPtrs;
+        for (const auto& s : image.sections)
+        {
+            if ((s.flags & SectionFlags_Code) || s.data == nullptr) continue;
+            if (s.base + s.size > image.base + image.size) continue; // ex.: .reloc fora da imagem
+            for (uint32_t off = 0; off + 4 <= s.size; off += 4)
+            {
+                uint32_t v = be32(s.data + off);
+                if (inText(*text, v)) dataPtrs.insert(v);
+            }
+        }
+
+        // "Switches" com contador: mtctr rN + sequência de bdz/bdnz. O analisador
+        // do recompilador para no primeiro blr e transforma os alvos seguintes em
+        // funções falsas. Para cada início sem .pdata, acompanhamos o alvo mais
+        // distante dos desvios internos; a função só acaba num terminador além dele.
+        int ctrFns = 0;
+        for (auto sIt = starts.begin(); sIt != starts.end(); ++sIt)
+        {
+            uint32_t start = *sIt;
+            if (pdataFns.count(start) || done.count(start)) continue;
+            auto nIt = std::next(sIt);
+            uint32_t nextStart = nIt == starts.end() ? text->base + text->size : *nIt;
+
+            uint32_t maxT = start, firstRet = 0, end = 0;
+            bool ctrBranch = false;
+            for (uint32_t pos = start; pos < text->base + text->size && pos < start + 0x10000; pos += 4)
+            {
+                uint32_t w = be32(text->data + (pos - text->base));
+                uint32_t op = w >> 26;
+                bool terminator = w == 0x4E800020 || w == 0x4E800420; // blr, bctr
+                if (op == 16 && (w & 3) == 0) // bc sem link, relativo
+                {
+                    int32_t bd = (int16_t)(w & 0xFFFC);
+                    uint32_t t = pos + bd;
+                    if (t > maxT) maxT = t;
+                    if (((w >> 21) & 0x4) == 0) ctrBranch = true; // BO: decrementa CTR
+                }
+                else if (op == 18 && (w & 3) == 0) // b sem link, relativo
+                {
+                    int32_t li = (int32_t)((w & 0x03FFFFFC) << 6) >> 6;
+                    uint32_t t = pos + li;
+                    if (t > pos && t < nextStart) { if (t > maxT) maxT = t; }
+                    else terminator = true; // tail call ou salto para trás
+                }
+                if (terminator)
+                {
+                    if (!firstRet) firstRet = pos;
+                    if (pos >= maxT) { end = pos + 4; break; }
+                }
+            }
+
+            if (!ctrBranch || !end || maxT <= firstRet) continue;
+            if (end > nextStart)
+            {
+                printf("  ! função 0x%X com bdz passa do próximo início 0x%X\n", start, nextStart);
+                ++broken;
+                continue;
+            }
+            auto ptr = dataPtrs.upper_bound(start);
+            if (ptr != dataPtrs.end() && *ptr < end)
+            {
+                printf("  ! função 0x%X com bdz contém 0x%X, referenciado nos dados\n", start, *ptr);
+                ++broken;
+                continue;
+            }
+            done.insert(start);
+            snprintf(buf, sizeof(buf), "    { address = 0x%X, size = 0x%X }, # bdz\n", start, end - start);
+            fnOut += buf;
+            ++ctrFns;
+        }
+
+        fnOut += "]\n";
+        printf("limites: %d cobertos pelo .pdata, %d funções com switch, %d com bdz, %d problemáticos\n",
+               covered, emitted, ctrFns, broken);
+
+        FILE* ff = fopen(argv[3], "wb");
+        fwrite(fnOut.data(), 1, fnOut.size(), ff);
+        fclose(ff);
+    }
+
+    printf("jump tables resolvidas: %zu\n", found.size());
+    for (auto& [k, n] : kinds) printf("  %-12s %d\n", k.c_str(), n);
+    printf("bctr não resolvidos:\n");
+    const char* names[] = { "ok", "sem guarda cmplwi/bgt (chamada indireta?)", "padrão não suportado",
+                            "índice sobrescrito", "tabela inválida", "label fora do .text" };
+    for (auto& [k, n] : fails) printf("  %-42s %d\n", names[(int)k], n);
+    if (!unsupported.empty())
+    {
+        printf("com guarda mas não resolvidos (investigar):\n");
+        for (uint32_t a : unsupported) printf("  0x%08X\n", a);
+    }
+    return 0;
+}

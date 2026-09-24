@@ -1,0 +1,22 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "macos-llvm",
+      "displayName": "macOS arm64 — LLVM 23 (tools/llvm)",
+      "description": "Clang 18+ exigido pelo XenonRecomp. Usa lld: o /usr/bin/ld do sistema aborta ao carregar o libLTO do LLVM 23.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "${sourceDir}/tools/llvm/LLVM-23.1.2-macOS-ARM64/bin/clang",
+        "CMAKE_CXX_COMPILER": "${sourceDir}/tools/llvm/LLVM-23.1.2-macOS-ARM64/bin/clang++",
+        "CMAKE_LINKER_TYPE": "LLD",
+        "CMAKE_OSX_SYSROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "macos-llvm", "configurePreset": "macos-llvm" }
+  ]
+}
