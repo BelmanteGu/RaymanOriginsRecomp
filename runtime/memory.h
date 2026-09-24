@@ -17,7 +17,3 @@ struct GuestMemory
 };
 
 extern GuestMemory g_memory;
-
-// Alocador "bump" provisório para estruturas do runtime (pilhas, PCR/TEB).
-// Região 0x70000000..0x7FFFFFFF, fora da imagem e da tabela de funções.
-uint32_t RuntimeAlloc(uint32_t size, uint32_t align = 16);
