@@ -279,6 +279,10 @@ bool LayoutFor(const std::vector<uint32_t>& inputs, VertexLayout& out) {
     out = {24, {{0, f3, 0}, {8, c, 12}, {4, f2, 16}}};
     return true;
   }
+  if (inputs == std::vector<uint32_t>{0, 4}) {  // deformed grids: position, uv
+    out = {20, {{0, f3, 0}, {4, f2, 12}}};
+    return true;
+  }
   if (inputs == std::vector<uint32_t>{0, 4, 5, 6, 7, 8}) {  // animated patch
     out = {64, {{0, f3, 0}, {8, c, 12}, {4, f2, 16}, {5, f4, 24}, {6, f4, 40}, {7, f2, 56}}};
     return true;
