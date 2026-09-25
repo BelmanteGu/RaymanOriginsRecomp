@@ -1,0 +1,29 @@
+# ---- Game content: NEVER commit (copyrighted) ----
+private/
+*.xex
+*.xexp
+*.ipk
+*.rar
+*.iso
+*.wmv
+# C++ derived from the game's code: generated locally, never published
+recomp/ppc/
+recomp/recomp.log
+
+# ---- Build and downloaded toolchains ----
+build/
+tools/llvm/
+tools/XenonRecomp/build/
+tools/diag/diag
+tools/diag/*.dSYM/
+tools/jumptables/rayman_jumptables
+tools/forks/cache/
+tools/forks/xenia/
+tools/forks/unleashed/
+tools/forks/recompiler.upstream.cpp
+tools/patches/
+
+# ---- Local tooling ----
+.flowforge/
+.forgeview/
+.DS_Store

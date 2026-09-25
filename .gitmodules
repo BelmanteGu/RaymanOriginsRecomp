@@ -1,0 +1,4 @@
+[submodule "tools/XenonRecomp"]
+	path = tools/XenonRecomp
+	url = https://github.com/BelmanteGu/XenonRecomp.git
+	branch = rayman-port
