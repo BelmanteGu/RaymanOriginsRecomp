@@ -53,3 +53,11 @@ Included as a git submodule (`thirdparty/o1heap`, https://github.com/pavel-kirie
 ## Unleashed Recompiled — GPL-3.0
 
 The runtime layout (guest thread block, memory reservation) follows https://github.com/hedge-dev/UnleashedRecomp. Code ported from it keeps its GPL-3.0 license, which is also this project's license.
+
+## SDL3 (Android Java glue) — zlib
+
+`android/app/src/main/java/org/libsdl/app/` is copied from SDL3 (https://github.com/libsdl-org/SDL), Copyright (C) 1997-2026 Sam Lantinga. Licensed under the zlib license; the full text is in `android/app/src/main/java/org/libsdl/app/LICENSE.txt`.
+
+## ReXGlue — BSD-3-Clause
+
+`android/rexglue-patches/` contains patches against ReXGlue (https://github.com/rexglue/rexglue-sdk), which is BSD-3-Clause licensed and derived from Xenia. The patches are distributed under the same terms.

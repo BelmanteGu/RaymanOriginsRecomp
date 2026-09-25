@@ -1,0 +1,61 @@
+From 70ed327542c52f2ad99da3c9a41b415c3ca97350 Mon Sep 17 00:00:00 2001
+From: BelmanteGu <gustavobelmanteribeiro@gmail.com>
+Date: Fri, 25 Sep 2026 09:54:12 -0400
+Subject: [PATCH 2/2] Android: call the platform AndroidInitialize hooks, log
+ to app external storage
+
+---
+ src/ui/windowed_app_main_sdl.cpp | 26 +++++++++++++++++++++-----
+ 1 file changed, 21 insertions(+), 5 deletions(-)
+
+diff --git a/src/ui/windowed_app_main_sdl.cpp b/src/ui/windowed_app_main_sdl.cpp
+index 2d896c6..6c4d973 100644
+--- a/src/ui/windowed_app_main_sdl.cpp
++++ b/src/ui/windowed_app_main_sdl.cpp
+@@ -131,7 +131,17 @@ int WINAPI wWinMain(HINSTANCE hinstance, HINSTANCE hinstance_prev, LPWSTR comman
+ #include <SDL3/SDL_main.h>
+ #include <SDL3/SDL_system.h>
+ 
++#include <rex/filesystem.h>
++#include <rex/memory/utils.h>
++#include <rex/thread.h>
++
+ int main(int argc, char* argv[]) {
++  // Resolve the API-26+ entry points the runtime loads dynamically
++  // (ASharedMemory_create for the guest address space, pthread_getname_np).
++  rex::memory::AndroidInitialize();
++  rex::thread::AndroidInitialize();
++  rex::filesystem::AndroidInitialize();
++
+   // No HOME for app processes: point it at the app's private storage so user
+   // data and caches land there.
+   if (const char* internal = SDL_GetAndroidInternalStoragePath()) {
+@@ -139,14 +149,20 @@ int main(int argc, char* argv[]) {
+   }
+   // Game data defaults to <app external storage>/game, a folder `adb push`
+   // can write without storage permissions.
++  // The log also goes there (the default, next to the executable, is the
++  // read-only native library directory), so `adb pull` can fetch it.
+   std::vector<std::string> args(argv, argv + argc);
+-  bool has_data_root = std::any_of(args.begin(), args.end(), [](const std::string& a) {
+-    return a.rfind("--game_data_root", 0) == 0;
+-  });
+-  if (!has_data_root) {
+-    if (const char* external = SDL_GetAndroidExternalStoragePath()) {
++  auto has_arg = [&args](const char* name) {
++    return std::any_of(args.begin(), args.end(),
++                       [name](const std::string& a) { return a.rfind(name, 0) == 0; });
++  };
++  if (const char* external = SDL_GetAndroidExternalStoragePath()) {
++    if (!has_arg("--game_data_root")) {
+       args.push_back(std::string("--game_data_root=") + external + "/game");
+     }
++    if (!has_arg("--log_file")) {
++      args.push_back(std::string("--log_file=") + external + "/rayman.log");
++    }
+   }
+   std::vector<char*> argv_ptrs;
+   for (auto& s : args) {
+-- 
+2.39.3 (Apple Git-146)
+

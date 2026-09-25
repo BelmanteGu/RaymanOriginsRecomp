@@ -40,3 +40,10 @@ rex/captures/
 rex/*.log
 tools/diag/imagedump
 tools/analysis/__pycache__/
+
+# ---- Android build ----
+android/app/libs/
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties

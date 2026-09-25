@@ -1,0 +1,55 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Native libraries come from the CMake build of rex/ for Android (see
+// android/build_apk.sh), staged into app/libs/arm64-v8a. The APK contains no
+// game data: the player copies their own dump to the app's external folder.
+android {
+    namespace = 'io.github.belmantegu.raymanrecomp'
+    compileSdk 35
+    ndkVersion = '28.2.13676358'
+
+    defaultConfig {
+        applicationId 'io.github.belmantegu.raymanrecomp'
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Signed with the debug key so `adb install` works during development.
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    sourceSets.main {
+        jniLibs.srcDir 'libs'
+    }
+
+    packaging {
+        // Libraries must be extracted to disk: the runtime finds its GPU plugin
+        // next to librexruntime.so (dladdr) and dlopen()s it by path.
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError = false
+    }
+}
