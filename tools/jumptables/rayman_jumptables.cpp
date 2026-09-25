@@ -380,6 +380,9 @@ int main(int argc, char** argv)
 
     std::set<uint32_t> starts;
     for (auto& [b, s] : pdataFns) starts.insert(b);
+    // Símbolos já conhecidos da imagem, como os thunks de import ("__imp__NtCreateFile"):
+    // uma função "por ponteiro" no mesmo endereço substituiria o import na tabela.
+    for (const auto& symbol : image.symbols) starts.insert(uint32_t(symbol.address));
     for (uint32_t i = 0; i < text->size / 4; ++i)
     {
         uint32_t w = be32(text->data + 4 * i);

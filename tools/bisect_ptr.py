@@ -18,7 +18,7 @@ P = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CFG = os.path.join(P, "recomp", "bisect-config")
 PPC = os.path.join(P, "recomp", "ppc-bisect")
 BUILD = os.path.join(P, "build-bisect")
-TOTAL = int(sys.argv[1])
+TOTAL = int(sys.argv[1]) if sys.argv[1] != "gen" else 0
 GOOD_MARK = sys.argv[2] if len(sys.argv) > 2 else "[fs] open d:\\localisation"
 
 
@@ -62,6 +62,10 @@ def good(limit):
     print(f"N={limit}: {'bom' if ok else 'ruim'}", flush=True)
     return ok
 
+
+if sys.argv[1] == "gen":  # só gera e compila a configuração N
+    generate(int(sys.argv[2]))
+    sys.exit(run(f'ninja -C "{BUILD}" rayman').returncode)
 
 lo, hi = 0, TOTAL  # lo é bom (sem funções por ponteiro), hi é ruim
 while hi - lo > 1:

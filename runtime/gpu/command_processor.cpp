@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -34,6 +35,9 @@ enum : uint32_t
 
 // Registradores
 constexpr uint32_t REG_CP_RB_WPTR = 0x01C5;
+constexpr uint32_t REG_SCRATCH_UMSK = 0x01DC;
+constexpr uint32_t REG_SCRATCH_ADDR = 0x01DD;
+constexpr uint32_t REG_SCRATCH_REG0 = 0x0578;
 constexpr uint32_t REG_WRITEBACK_START = 0x0A04;
 constexpr uint32_t REG_WRITEBACK_SIZE = 0x0A05;
 constexpr uint32_t REG_COHER_STATUS_HOST = 0x0A31;
@@ -77,11 +81,11 @@ struct Gpu
     uint32_t counter = 0;           // contador de vblank/swaps (EVENT_WRITE_SHD)
     uint64_t frames = 0;
     std::atomic<bool> running{ false };
-    std::thread thread;
-    PPCContext* ctx = nullptr;      // contexto do guest desta thread (interrupções)
 };
 
 Gpu g_gpu;
+const bool g_gpuLog = getenv("RAYMAN_GPU_LOG") != nullptr;
+int g_fenceLogs = 0, g_kickLogs = 0, g_packetLogs = 0;
 
 void WriteRegister(uint32_t index, uint32_t value)
 {
@@ -90,17 +94,33 @@ void WriteRegister(uint32_t index, uint32_t value)
     if (index == REG_COHER_STATUS_HOST)
         value &= ~0x80000000u; // coerência de cache "concluída" na hora
     g_gpu.registers[index] = value;
+
+    // Registradores scratch: com o bit ligado em SCRATCH_UMSK, o hardware espelha
+    // o valor em SCRATCH_ADDR + n*4. O D3D usa isso para sincronizar CPU e GPU.
+    if (index >= REG_SCRATCH_REG0 && index < REG_SCRATCH_REG0 + 8)
+    {
+        uint32_t n = index - REG_SCRATCH_REG0;
+        if ((1u << n) & g_gpu.registers[REG_SCRATCH_UMSK])
+            Store32(PhysicalToGuest(g_gpu.registers[REG_SCRATCH_ADDR] + n * 4), value);
+    }
 }
+
+// Contexto do guest da thread que dispara a interrupção (GPU ou vsync).
+thread_local PPCContext* t_interruptCtx = nullptr;
+std::mutex g_interruptMutex; // o callback do jogo não espera ser reentrante
 
 void DispatchInterrupt(uint32_t source, uint32_t cpu)
 {
     uint32_t callback = g_graphicsInterrupt.callback.load();
-    if (callback == 0 || g_gpu.ctx == nullptr)
+    if (callback == 0 || t_interruptCtx == nullptr)
         return;
-    PPCContext& ctx = *g_gpu.ctx;
+    std::lock_guard lock(g_interruptMutex);
+    PPCContext& ctx = *t_interruptCtx;
     ctx.r3.u64 = source;
     ctx.r4.u64 = g_graphicsInterrupt.userData.load();
-    (void)cpu;
+    // O tratador lê a CPU atual em PCR+0x10C e confirma a interrupção limpando o bit
+    // dela numa máscara que a GPU espera zerar: roda "como" a CPU pedida (Xenia).
+    *static_cast<uint8_t*>(g_memory.Translate(ctx.r13.u32 + 0x10C)) = uint8_t(cpu);
     g_memory.FindFunction(callback)(ctx, g_memory.base);
 }
 
@@ -129,7 +149,10 @@ void ExecuteBuffer(Reader& reader, uint32_t endIndex);
 
 void ExecutePacket(Reader& reader)
 {
+    uint32_t packetAddress = reader.base + (reader.index % reader.sizeDwords) * 4;
     uint32_t packet = reader.Read();
+    if (g_gpuLog && g_packetLogs++ < 2000)
+        fprintf(stderr, "[gpu]   pacote @0x%08X: 0x%08X (tipo %u, op 0x%02X, n %u)\n", packetAddress, packet, packet >> 30, (packet >> 8) & 0x7F, ((packet >> 16) & 0x3FFF) + 1);
     if (packet == 0 || packet == 0x0BADF00D)
         return;
 
@@ -197,6 +220,8 @@ void ExecutePacket(Reader& reader)
         uint32_t ref = reader.Read(), mask = reader.Read(), wait = reader.Read();
         reader.Skip(count - 5);
         bool memory = waitInfo & 0x10;
+        if (g_gpuLog)
+            fprintf(stderr, "[gpu] WAIT_REG_MEM info=0x%X %s=0x%08X ref=0x%08X mask=0x%08X espera=0x%X\n", waitInfo, memory ? "mem" : "reg", pollAddress, ref, mask, wait);
         for (int attempt = 0;; attempt++)
         {
             uint32_t value = memory ? GpuSwap(*static_cast<uint32_t*>(g_memory.Translate(PhysicalToGuest(pollAddress & ~3u))), pollAddress & 3)
@@ -272,6 +297,8 @@ void ExecutePacket(Reader& reader)
                 destination = 0x7F000000 + (target - base);
         }
         *static_cast<uint32_t*>(g_memory.Translate(destination)) = data;
+        if (g_gpuLog && g_fenceLogs++ < 8)
+            fprintf(stderr, "[gpu] fence: 0x%08X -> guest 0x%08X (endian %u)\n", (initiator >> 31) & 1 ? g_gpu.counter : value, destination, address & 3);
         return;
     }
     case PM4_EVENT_WRITE_EXT:
@@ -308,29 +335,40 @@ void GpuThread()
 {
     PPCContext ctx;
     InitMainThread(ctx); // bloco de thread do guest para rodar o callback de interrupção
-    g_gpu.ctx = &ctx;
+    t_interruptCtx = &ctx;
 
-    auto nextVblank = std::chrono::steady_clock::now();
     while (g_gpu.running)
     {
         uint32_t writeIndex = Load32(MMIO_BASE + REG_CP_RB_WPTR * 4) % (g_gpu.ringDwords ? g_gpu.ringDwords : 1);
         if (g_gpu.ringDwords && g_gpu.readIndex != writeIndex)
         {
+            if (g_gpuLog && g_kickLogs++ < 8)
+                fprintf(stderr, "[gpu] kick: leitura %u -> escrita %u\n", g_gpu.readIndex, writeIndex);
             Reader ring{ g_gpu.ringBase, g_gpu.ringDwords, g_gpu.readIndex, true };
             ExecuteBuffer(ring, writeIndex);
             g_gpu.readIndex = ring.index;
             if (g_gpu.readWriteback)
                 Store32(PhysicalToGuest(g_gpu.readWriteback), g_gpu.readIndex);
         }
-
-        auto now = std::chrono::steady_clock::now();
-        if (now >= nextVblank)
-        {
-            nextVblank = now + std::chrono::microseconds(16667);
-            g_gpu.counter++;
-            DispatchInterrupt(0, 2); // vblank
-        }
         std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+}
+
+// Vsync numa thread própria (como o Xenia): o processador de comandos pode ficar
+// preso num WAIT_REG_MEM esperando justamente o que o tratador de vblank escreve.
+void VsyncThread()
+{
+    PPCContext ctx;
+    InitMainThread(ctx);
+    t_interruptCtx = &ctx;
+
+    auto next = std::chrono::steady_clock::now();
+    while (g_gpu.running)
+    {
+        next += std::chrono::microseconds(16667);
+        std::this_thread::sleep_until(next);
+        g_gpu.counter++;
+        DispatchInterrupt(0, 2); // vblank
     }
 }
 
@@ -345,8 +383,8 @@ void StartGpu()
     Store32(MMIO_BASE + 0x1951 * 4, 0x00000001); // status de interrupção: vblank
     Store32(MMIO_BASE + 0x1961 * 4, 0x050002D0); // AVIVO_D1MODE_VIEWPORT_SIZE: 1280x720
 
-    g_gpu.thread = std::thread(GpuThread);
-    g_gpu.thread.detach();
+    std::thread(GpuThread).detach();
+    std::thread(VsyncThread).detach();
     fprintf(stderr, "[gpu] processador de comandos iniciado (ring 0x%08X, %u dwords)\n", g_gpu.ringBase, g_gpu.ringDwords);
 }
 } // namespace
