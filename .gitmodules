@@ -5,3 +5,6 @@
 [submodule "thirdparty/o1heap"]
 	path = thirdparty/o1heap
 	url = https://github.com/pavel-kirienko/o1heap.git
+[submodule "thirdparty/SDL"]
+	path = thirdparty/SDL
+	url = https://github.com/libsdl-org/SDL.git

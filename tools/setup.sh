@@ -16,6 +16,15 @@ if [ "$(uname)" = "Darwin" ] && [ ! -x tools/llvm/LLVM-23.1.2-macOS-ARM64/bin/cl
     rm tools/llvm/llvm.tar.xz
 fi
 
+if [ "$(uname)" = "Darwin" ] && [ ! -f tools/moltenvk/MoltenVK/MoltenVK/dynamic/dylib/macOS/libMoltenVK.dylib ]; then
+    echo "Baixando MoltenVK 1.4.2 (Vulkan sobre Metal)..."
+    mkdir -p tools/moltenvk
+    curl -L --fail -o tools/moltenvk/mvk.tar \
+        https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-macos.tar
+    tar -xf tools/moltenvk/mvk.tar -C tools/moltenvk
+    rm tools/moltenvk/mvk.tar
+fi
+
 cmake -S tools/XenonRecomp -B tools/XenonRecomp/build -G Ninja -DCMAKE_BUILD_TYPE=Release -Wno-dev
 ninja -C tools/XenonRecomp/build XenonRecomp XenonAnalyse
 

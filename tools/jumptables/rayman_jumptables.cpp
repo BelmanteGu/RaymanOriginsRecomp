@@ -38,6 +38,7 @@ namespace
     struct Switch
     {
         uint32_t base = 0;
+        uint32_t bctr = 0; // endereço do bctr (chave das tabelas no ReXGlue)
         uint32_t r = 0;
         uint32_t def = 0;
         std::vector<uint32_t> labels;
@@ -209,6 +210,7 @@ namespace
 
         out = {};
         out.base = bgtAddr + 4;
+        out.bctr = bctrAddr;
         out.r = idx;
         out.def = def;
         out.labels.reserve(count);
@@ -339,6 +341,7 @@ static Fail ResolveUnguarded(const Image& image, const Section& text, uint32_t b
 
     out = {};
     out.base = windowStart;
+    out.bctr = bctrAddr;
     out.r = idx;
     out.kind = "absolute-unguarded";
     for (uint32_t i = 0; i < 1024; i++)
@@ -482,34 +485,12 @@ int main(int argc, char** argv)
     if (argc >= 4)
     {
         std::string fnOut = "functions = [\n";
-        int emitted = 0, covered = 0, broken = 0;
+        int emitted = 0, covered = 0, broken = 0, ctrFns = 0, ptrFns = 0;
         std::set<uint32_t> done;
-        for (const auto& sw : found)
-        {
-            auto it = starts.upper_bound(sw.base);
-            uint32_t end = it == starts.end() ? text->base + text->size : *it;
-            --it;
-            uint32_t start = *it;
 
-            uint32_t lo = sw.def, hi = sw.def;
-            for (uint32_t l : sw.labels) { lo = std::min(lo, l); hi = std::max(hi, l); }
-
-            auto pd = pdataFns.find(start);
-            if (pd != pdataFns.end() && lo >= start && hi < start + pd->second) { ++covered; continue; }
-
-            if (lo < start || hi >= end)
-            {
-                printf("  ! switch 0x%X: labels [0x%X,0x%X] fora de [0x%X,0x%X)\n", sw.base, lo, hi, start, end);
-                ++broken;
-                continue;
-            }
-            if (!done.insert(start).second) continue;
-            snprintf(buf, sizeof(buf), "    { address = 0x%X, size = 0x%X },\n", start, end - start);
-            fnOut += buf;
-            ++emitted;
-        }
-        // Endereços de código referenciados como ponteiros nos dados (vtables,
-        // callbacks): são funções reais mesmo sem bl, então não podem ser engolidos.
+        // ---- 1. Todos os inícios conhecidos, incluindo os alcançados só por ponteiro ----
+        // Endereços de código em dados (vtables, callbacks) e pares lis/addi no código:
+        // funções reais mesmo sem bl nem .pdata.
         std::set<uint32_t> dataPtrs;
         for (const auto& s : image.sections)
         {
@@ -522,70 +503,6 @@ int main(int argc, char** argv)
             }
         }
 
-        // "Switches" com contador: mtctr rN + sequência de bdz/bdnz. O analisador
-        // do recompilador para no primeiro blr e transforma os alvos seguintes em
-        // funções falsas. Para cada início sem .pdata, acompanhamos o alvo mais
-        // distante dos desvios internos; a função só acaba num terminador além dele.
-        int ctrFns = 0;
-        for (auto sIt = starts.begin(); sIt != starts.end(); ++sIt)
-        {
-            uint32_t start = *sIt;
-            if (pdataFns.count(start) || done.count(start)) continue;
-            auto nIt = std::next(sIt);
-            uint32_t nextStart = nIt == starts.end() ? text->base + text->size : *nIt;
-
-            uint32_t maxT = start, firstRet = 0, end = 0;
-            bool ctrBranch = false;
-            for (uint32_t pos = start; pos < text->base + text->size && pos < start + 0x10000; pos += 4)
-            {
-                uint32_t w = be32(text->data + (pos - text->base));
-                uint32_t op = w >> 26;
-                bool terminator = w == 0x4E800020 || w == 0x4E800420; // blr, bctr
-                if (op == 16 && (w & 3) == 0) // bc sem link, relativo
-                {
-                    int32_t bd = (int16_t)(w & 0xFFFC);
-                    uint32_t t = pos + bd;
-                    if (t > maxT) maxT = t;
-                    if (((w >> 21) & 0x4) == 0) ctrBranch = true; // BO: decrementa CTR
-                }
-                else if (op == 18 && (w & 3) == 0) // b sem link, relativo
-                {
-                    int32_t li = (int32_t)((w & 0x03FFFFFC) << 6) >> 6;
-                    uint32_t t = pos + li;
-                    if (t > pos && t < nextStart) { if (t > maxT) maxT = t; }
-                    else terminator = true; // tail call ou salto para trás
-                }
-                if (terminator)
-                {
-                    if (!firstRet) firstRet = pos;
-                    if (pos >= maxT) { end = pos + 4; break; }
-                }
-            }
-
-            if (!ctrBranch || !end || maxT <= firstRet) continue;
-            if (end > nextStart)
-            {
-                printf("  ! função 0x%X com bdz passa do próximo início 0x%X\n", start, nextStart);
-                ++broken;
-                continue;
-            }
-            auto ptr = dataPtrs.upper_bound(start);
-            if (ptr != dataPtrs.end() && *ptr < end)
-            {
-                printf("  ! função 0x%X com bdz contém 0x%X, referenciado nos dados\n", start, *ptr);
-                ++broken;
-                continue;
-            }
-            done.insert(start);
-            snprintf(buf, sizeof(buf), "    { address = 0x%X, size = 0x%X }, # bdz\n", start, end - start);
-            fnOut += buf;
-            ++ctrFns;
-        }
-
-        // Funções alcançadas só por ponteiro (métodos de vtable, callbacks): sem
-        // bl nem .pdata, o recompilador as absorve na função anterior e a tabela
-        // de chamadas indiretas fica sem entrada. Candidatos: endereços de código
-        // em dados e pares lis/addi no código, precedidos de terminador ou padding.
         std::set<uint32_t> switchLabels;
         std::map<uint32_t, uint32_t> switchReach; // base do switch -> maior label
         for (const auto& sw : found)
@@ -621,7 +538,6 @@ int main(int argc, char** argv)
         auto isTerminatorOrPad = [](uint32_t w) {
             return w == 0x4E800020 || w == 0x4E800420 || w == 0 || ((w >> 26) == 18 && (w & 1) == 0);
         };
-
         // Alvos de desvio condicional são labels internos: bc nunca sai da função.
         std::set<uint32_t> branchTargets;
         for (uint32_t i = 0; i < text->size / 4; ++i)
@@ -630,7 +546,7 @@ int main(int argc, char** argv)
             if ((w >> 26) == 16 && (w & 3) == 0)
                 branchTargets.insert(text->base + 4 * i + uint32_t(int32_t(int16_t(w & 0xFFFC))));
         }
-        // Dentro de uma função do .pdata (que tem tamanho exato), só o início é função.
+        // Dentro de uma função do .pdata (tamanho exato), só o início é função.
         auto insidePdataFunction = [&](uint32_t address) {
             auto p = pdataFns.upper_bound(address);
             if (p == pdataFns.begin()) return false;
@@ -644,19 +560,28 @@ int main(int argc, char** argv)
         {
             if (starts.count(t) || switchLabels.count(t) || t == text->base) continue;
             if (branchTargets.count(t) || insidePdataFunction(t)) continue;
+            // Entre um switch e o último caso dele: é corpo da função, não um início.
+            bool insideSwitch = false;
+            for (const auto& [base, hi] : switchReach)
+                if (t > base && t <= hi) { insideSwitch = true; break; }
+            if (insideSwitch) continue;
             if (!isTerminatorOrPad(be32(text->data + (t - 4 - text->base)))) continue;
             newStarts.push_back(t);
             allStarts.insert(t);
         }
-
         if (const char* limit = getenv("JT_PTR_LIMIT")) // bissecção: só as N primeiras
             newStarts.resize(std::min<size_t>(newStarts.size(), strtoul(limit, nullptr, 10)));
-        int ptrFns = 0;
-        for (uint32_t start : newStarts)
-        {
-            auto nIt = allStarts.upper_bound(start);
-            uint32_t nextStart = nIt == allStarts.end() ? text->base + text->size : *nIt;
-            uint32_t maxT = start, end = 0;
+
+        // ---- 2. Medição comum: acompanha o alvo mais distante dos desvios internos ----
+        // (e dos labels de switch); termina num blr/bctr/tail call além dele ou no
+        // próximo início conhecido. Um b para um início conhecido é tail call.
+        auto nextKnownStart = [&](uint32_t address) {
+            auto it = allStarts.upper_bound(address);
+            return it == allStarts.end() ? text->base + text->size : *it;
+        };
+        auto walkFunction = [&](uint32_t start, uint32_t minEnd, bool* ctrBranch, uint32_t* firstRet) {
+            uint32_t nextStart = nextKnownStart(start);
+            uint32_t maxT = std::max(start, minEnd);
             for (uint32_t pos = start; pos < nextStart; pos += 4)
             {
                 uint32_t w = be32(text->data + (pos - text->base));
@@ -665,16 +590,72 @@ int main(int argc, char** argv)
                 if (reach != switchReach.end()) maxT = std::max(maxT, reach->second);
                 bool terminator = w == 0x4E800020 || w == 0x4E800420 || w == 0;
                 if (op == 16 && (w & 3) == 0)
+                {
                     maxT = std::max(maxT, pos + uint32_t(int32_t(int16_t(w & 0xFFFC))));
+                    if (ctrBranch && ((w >> 21) & 0x4) == 0) *ctrBranch = true; // BO: decrementa CTR
+                }
                 else if (op == 18 && (w & 3) == 0)
                 {
                     uint32_t t = pos + uint32_t((int32_t)((w & 0x03FFFFFC) << 6) >> 6);
-                    if (t > pos && t < nextStart) maxT = std::max(maxT, t);
-                    else terminator = true;
+                    if (t > pos && t < nextStart && !allStarts.count(t)) maxT = std::max(maxT, t);
+                    else terminator = true; // tail call ou salto para trás
                 }
-                if (terminator && pos >= maxT) { end = pos + 4; break; }
+                if (terminator)
+                {
+                    if (firstRet && !*firstRet) *firstRet = pos;
+                    if (pos >= maxT) return pos + 4;
+                }
             }
-            if (!end) end = nextStart;
+            return nextStart;
+        };
+
+        // ---- 3a. Funções-folha (sem .pdata) com jump table ----
+        for (const auto& sw : found)
+        {
+            auto it = allStarts.upper_bound(sw.base);
+            --it;
+            uint32_t start = *it;
+            uint32_t lo = sw.def, hi = sw.def;
+            for (uint32_t l : sw.labels) { lo = std::min(lo, l); hi = std::max(hi, l); }
+
+            auto pd = pdataFns.find(start);
+            if (pd != pdataFns.end() && lo >= start && hi < start + pd->second) { ++covered; continue; }
+            if (done.count(start)) continue;
+
+            uint32_t end = walkFunction(start, hi + 4, nullptr, nullptr);
+            if (lo < start || hi >= end)
+            {
+                printf("  ! switch 0x%X: labels [0x%X,0x%X] fora de [0x%X,0x%X)\n", sw.base, lo, hi, start, end);
+                ++broken;
+                continue;
+            }
+            done.insert(start);
+            snprintf(buf, sizeof(buf), "    { address = 0x%X, size = 0x%X },\n", start, end - start);
+            fnOut += buf;
+            ++emitted;
+        }
+
+        // ---- 3b. "Switches" com contador: mtctr rN + sequência de bdz/bdnz ----
+        // O analisador do recompilador para no primeiro blr e transforma os alvos
+        // seguintes em funções falsas.
+        for (uint32_t start : starts)
+        {
+            if (pdataFns.count(start) || done.count(start)) continue;
+            bool ctrBranch = false;
+            uint32_t firstRet = 0;
+            uint32_t end = walkFunction(start, 0, &ctrBranch, &firstRet);
+            if (!ctrBranch || !firstRet || end <= firstRet + 4) continue;
+            done.insert(start);
+            snprintf(buf, sizeof(buf), "    { address = 0x%X, size = 0x%X }, # bdz\n", start, end - start);
+            fnOut += buf;
+            ++ctrFns;
+        }
+
+        // ---- 3c. Funções alcançadas só por ponteiro ----
+        for (uint32_t start : newStarts)
+        {
+            if (done.count(start)) continue;
+            uint32_t end = walkFunction(start, 0, nullptr, nullptr);
             snprintf(buf, sizeof(buf), "    { address = 0x%X, size = 0x%X }, # ptr\n", start, end - start);
             fnOut += buf;
             ++ptrFns;
@@ -683,6 +664,57 @@ int main(int argc, char** argv)
         fnOut += "]\n";
         printf("limites: %d cobertos pelo .pdata, %d funções com switch, %d com bdz, %d por ponteiro, %d problemáticos\n",
                covered, emitted, ctrFns, ptrFns, broken);
+
+        // Dicas no formato do manifesto do ReXGlue ([functions] e [[switch_tables]]).
+        if (argc >= 5)
+        {
+            std::string hints = "# Gerado por tools/jumptables (Rayman Origins X360) para o ReXGlue.\n\n[functions]\n";
+            // O ReXGlue não aceita funções sobrepostas. As funções de switch/bdz vêm
+            // primeiro na lista (tamanho deduzido da estrutura) e têm prioridade: uma
+            // candidata "por ponteiro" que cair dentro de uma já aceita é descartada.
+            std::vector<std::pair<uint32_t, uint32_t>> entries; // (início, tamanho), na ordem de prioridade
+            size_t pos = 0;
+            while ((pos = fnOut.find("{ address = ", pos)) != std::string::npos)
+            {
+                unsigned address = 0, size = 0;
+                sscanf(fnOut.c_str() + pos, "{ address = 0x%X, size = 0x%X }", &address, &size);
+                entries.emplace_back(address, size);
+                pos += 12;
+            }
+            std::map<uint32_t, uint32_t> accepted; // início -> fim
+            int dropped = 0;
+            for (auto [address, size] : entries)
+            {
+                uint32_t end = address + size;
+                auto next = accepted.lower_bound(address);
+                bool overlaps = (next != accepted.end() && next->first < end) ||
+                                (next != accepted.begin() && std::prev(next)->second > address);
+                if (overlaps) { ++dropped; continue; }
+                accepted[address] = end;
+            }
+            for (auto [address, end] : accepted)
+            {
+                snprintf(buf, sizeof(buf), "0x%08X = { size = 0x%X }\n", address, end - address);
+                hints += buf;
+            }
+            printf("dicas ReXGlue: %zu funções (%d sobrepostas descartadas), %zu tabelas\n", accepted.size(), dropped, found.size());
+            for (const auto& sw : found)
+            {
+                snprintf(buf, sizeof(buf), "\n[[switch_tables]]\naddress = 0x%08X\n", sw.bctr);
+                hints += buf;
+                snprintf(buf, sizeof(buf), "register = %u\nlabels = [", sw.r);
+                hints += buf;
+                for (size_t i = 0; i < sw.labels.size(); i++)
+                {
+                    snprintf(buf, sizeof(buf), "%s0x%08X", i ? ", " : "", sw.labels[i]);
+                    hints += buf;
+                }
+                hints += "]\n";
+            }
+            FILE* hf = fopen(argv[4], "wb");
+            fwrite(hints.data(), 1, hints.size(), hf);
+            fclose(hf);
+        }
 
         FILE* ff = fopen(argv[3], "wb");
         fwrite(fnOut.data(), 1, fnOut.size(), ff);

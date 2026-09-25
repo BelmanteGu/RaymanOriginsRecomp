@@ -4,6 +4,8 @@ Technical notes on how Rayman Origins (Xbox 360) went from a raw `default.xex` t
 
 ## Where things stand
 
+**Update: the title screen renders, with audio, on macOS through ReXGlue.** See section 5; Windows and Android are in section 6. The rest of this section describes the milestone reached with our own runtime.
+
 The recompiled game boots, initializes its engine, loads its UbiArt bundles, starts about 20 threads and submits frames to a GPU command processor at 1280×720 without crashing. Nothing is drawn yet: the GPU backend executes synchronization packets only.
 
 | Milestone | Result |
@@ -83,9 +85,56 @@ A PM4 command processor thread consumes the ring buffer written by the game's Di
 2. **Scratch registers** (`SCRATCH_REG0..7`) are mirrored to `SCRATCH_ADDR + n*4` when enabled in `SCRATCH_UMSK`. Direct3D synchronizes through them.
 3. **Command-stream interrupts are dispatched once per CPU in the mask, as that CPU.** The handler reads the current CPU from `PCR+0x10C` and acknowledges by clearing that CPU's bit.
 
+
+## 5. ReXGlue: the title screen
+
+[ReXGlue](https://github.com/rexglue/rexglue-sdk) (BSD-3-Clause) is an Xbox 360 recompilation SDK whose runtime is Xenia's kernel, Vulkan GPU and XMA audio, with an ahead-of-time codegen in the spirit of XenonRecomp. It ships macOS ARM64 builds (Vulkan through MoltenVK).
+
+Its codegen needed exactly what `tools/jumptables` already knew about this game:
+
+- The first run stopped on `Call to invalid or unregistered function at guest address 0x8297D9E8`, a function reached only through a pointer. Our list had it.
+- ReXGlue rejects overlapping functions, which exposed a flaw in our sizing: a function containing a switch ran up to the next *structural* start and swallowed vtable methods behind it. Sizes now come from a single walk that knows every start (including pointer-reached ones), treats a branch to a known start as a tail call, and ignores pointer candidates between a switch and its cases. Result: 16 switch functions, 50 `bdz` functions, 5807 pointer-reached functions, 173 jump tables, zero conflicts.
+- The GPU is a plugin (`--gpu_plugin=xenos`, `librexgpu-xenos.dylib` next to the executable) and the Vulkan loader must be pointed at MoltenVK's ICD (`VK_DRIVER_FILES`). `rex/run.sh` does both.
+
+On an Apple M1 the game shows the Ubisoft logo, then the Rayman Origins title screen ("Press START"), with audio from the Mac speakers.
+
+### Verifying without looking at the window
+
+`screencapture` only records the desktop wallpaper when the terminal lacks the Screen Recording permission, so it can't prove anything renders. `RaymanApp::OnPostSetup` (`rex/src/rayman_app.h`) instead reads the guest's front buffer through `presenter()->CaptureGuestOutput()` every 10 seconds when `RAYMAN_CAPTURE=1` is set, and writes `captures/frame_NNN.ppm`. A 60-second run gives:
+
+| Time | Frame |
+|---|---|
+| 10 s | Ubisoft logo |
+| 20–30 s | black (movie/loading transition) |
+| 40–60 s | title screen: jungle background, logo, "Press START", copyright line |
+
+### Audio: our runtime vs ReXGlue
+
+Both runtimes can dump what the game submits to the audio driver (`RAYMAN_AUDIO_DUMP=<file>`, stereo float32 at 48 kHz, 6-channel frames downmixed). In ReXGlue this is a mid-asm hook (`rex/rayman_hooks.toml`, `rex/src/hooks.cpp`) on the game's call to `XAudioSubmitRenderDriverFrame`; in `runtime/` it lives in the import itself.
+
+| Runtime | Result over ~60 s |
+|---|---|
+| `runtime/` (ours) | sound in the first 10 s only (peak 0.41), then silence |
+| ReXGlue | continuous sound for 59 s (peak ~0.4), with a 5 s gap at the screen transition |
+
+Our driver pacing (one callback every 5.333 ms) is correct, so the game's mixer runs. The difference is the XMA decoder: music and most effects are XMA streams, and `runtime/` only allocates XMA contexts without decoding them. ReXGlue ships Xenia's decoder (FFmpeg), so reimplementing it in `runtime/` would duplicate working code. `runtime/` stays as a reference for the kernel semantics.
+
+## 6. Other platforms
+
+**Windows.** ReXGlue is Windows-first and ships a `win-amd64` SDK, so the same `rex/` project builds there with the `win-amd64-release` preset. See [WINDOWS.md](WINDOWS.md).
+
+**Android (#17).** At least one Xbox 360 game already runs on Android through ReXGlue: [deivid22srk/redahm-android](https://github.com/deivid22srk/redahm-android) (NDK r27, Gradle, shared SDL3, APK built in CI). It has **no license**, so none of its code can be copied here; it only shows that the approach works. The plan:
+
+1. Build the ReXGlue runtime for `android-arm64` from source. There is no prebuilt Android SDK, and this is the main risk.
+2. Gradle project with the NDK and SDL3's Android activity. Android has native Vulkan, so no MoltenVK.
+3. The APK contains no game data: the player copies their own dump to the app's folder.
+4. On-screen controls; Bluetooth controllers work through SDL.
+
+Expect a recent high-end phone (Snapdragon 8 Gen 1 class or better).
+
 ## Next steps
 
-- Draw: translate Xenos state and shaders to Vulkan and show the front buffer (#12, #13).
-- Audio (#14), input through SDL (#15), movies (#16).
+- Play past the title screen and check levels, movies (#16) and saves.
+- Performance and correctness on MoltenVK.
 - Validate the ported VMX instructions against Xenia's PPC tests (#4).
-- Android (#17).
+- Android (#17), as described in section 6.

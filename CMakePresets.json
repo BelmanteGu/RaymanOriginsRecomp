@@ -14,6 +14,8 @@
         "CMAKE_LINKER_TYPE": "LLD",
         "CMAKE_OSX_SYSROOT": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
         "CMAKE_C_FLAGS": "-fuse-ld=lld -Wno-unused-command-line-argument",
+        "CMAKE_OBJC_FLAGS": "-fuse-ld=lld -Wno-unused-command-line-argument",
+        "CMAKE_OBJCXX_FLAGS": "-fuse-ld=lld -Wno-unused-command-line-argument",
         "CMAKE_CXX_FLAGS": "-fuse-ld=lld -Wno-unused-command-line-argument -nostdinc++ -isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1"
       }
     }
