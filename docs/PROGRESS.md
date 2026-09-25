@@ -177,6 +177,22 @@ Each `.ckd` is a single, uncompressed XDK compiled-shader container (`0x102A1100
 
 IPK layout (version 3, as observed): header `magic 0x50EC12BA, version, ?, data base, file count`, then entries `{offset count, size, compressed size, timestamp u64, offsets u64[count], name length, UTF-16BE path}`. Data is at `data base + offset`.
 
+### Unleashed's device layout fits
+
+Unleashed Recompiled's video layer (`gpu/video.cpp`, GPL-3.0) hooks 42 D3D functions (`CreateDevice`, resource creation and locking, `SetTexture`, `SetRenderTarget`, `Clear`, `SetViewport`, the draw calls, shaders, vertex declarations, `Present`). It covers the inline part of the API by building the guest device itself:
+
+- The XDK's inline `SetRenderState` calls through a table of function pointers inside the device (`lwz rX, 0x40 + 4*n(device)` → `mtctr` → `bctrl`). Unleashed fills that table with its own setters.
+- Sampler states and shader constants are read from the device structure at draw time.
+
+The device layout is XDK-version specific, so it was checked against Rayman Origins (XDK 20871). A scan of the executable for that inline pattern gives:
+
+| Slot table | Unleashed's `GuestDevice` | Rayman Origins |
+|---|---|---|
+| Render-state setters | 0x65 entries at `+0x40` | **101 (0x65) distinct slots at `+0x40`**, 9,300 inline call sites |
+| Sampler-state setters | 0x14 entries at `+0x1D4` | starts at `+0x1D4`, **27 slots** (up to `+0x23C`) |
+
+The render-state table matches exactly. The sampler table is longer in this XDK, so the padding after it has to be re-measured before the rest of the structure (sampler states, shader constants, viewport) can be trusted. Next: pin down the remaining `GuestDevice` offsets and map the 42 hooked functions to their Rayman addresses. The Vd* callers and the resource vtables at `0x82085B08`–`0x82086C04` give the anchors.
+
 ### Why the Mac is the right test bed
 
 The recompiled code already runs as **ARM64** on Apple Silicon (SIMDe for VMX), which is the Android CPU architecture. Boot, threads, file I/O, audio and the title screen are all validated on ARM64, so most of the Android risk is exercised daily. What the Mac does not exercise is texture compression: Apple Silicon Macs decode BC (DXT), most phone GPUs don't.
