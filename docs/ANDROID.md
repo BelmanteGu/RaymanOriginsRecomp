@@ -74,7 +74,11 @@ The app reads `default.xex` and the bundles from that folder. The runtime log is
 
 ## Status on a Galaxy S23 (Adreno 740, Android 16)
 
-The game boots: the native libraries load, the Vulkan device and swapchain come up at 2340×1080, the guest memory is mapped, audio opens at 6 channels / 48 kHz, and the Xenos emulation builds the game's pipelines with no errors in the log.
+**The game runs and renders.** The native libraries load, the Vulkan device and swapchain come up at 2340×1080, the guest memory is mapped, audio opens at 6 channels / 48 kHz, and the game reaches gameplay. The screenshot below is the attract-mode demo in Gourmand Land, captured with `adb exec-out screencap`:
+
+![Rayman Origins running on a Galaxy S23](media/android-s23-first-boot.jpg)
+
+Graphics still go through the Xenos emulation. Performance hasn't been measured, and there are no touch controls yet (use a Bluetooth controller).
 
 ## Next
 
