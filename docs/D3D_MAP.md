@@ -58,3 +58,14 @@ All 31 game shaders (`bootsequence_X360.ipk`, `shaders/compiled/x360/`) convert 
 
 - The game creates **34 shaders**. **31 match the precompiled SPIR-V cache exactly** (the 31 `.ckd` files). The other 3 (`9D7D9F03C1801F8D` VS, `D6F4DC8BD4BDE385` and `247180442A9D01BC` PS) are created from the executable itself and need adding to the cache.
 - A title-screen frame has **~130 draws, all indexed triangle lists, with 6 shader combinations**, and **no draw uses a shader outside the known set**.
+
+## First native frame (offline, software)
+
+`tools/native_renderer/dumpview` reads a frame dump (`RAYMAN_NATIVE_DUMP=<frame>`, or create `captures/dump_now` while the game runs), decodes every bound texture and rebuilds the frame on the CPU from the captured D3D state: no Xenos emulation involved. On a gameplay frame (154 draws):
+
+- **Textures: 49/49 decoded** (Xenos 2D tiling, 8in32/8in16 endian swap, DXT1/3/5, 8888 stored B G R A after the swap).
+- **Vertices:** `renderpct` sprites are position `float3` + D3DCOLOR (ARGB) + UV `float2`, 24 bytes, big-endian; 16-bit indices `0,1,3, 0,3,2`. The VS applies a perspective WVP (`c0..c3`, 45° fov: UbiArt's parallax camera) and a UV matrix (`c4..c7`); color × `c13`.
+- **Pixel shaders:** `BDFAE039…` = texture × color; `3A608A3C…` adds depth fog, `lerp(result, c16.rgb, c16.a)`.
+- **Sampling:** wrap/mirror/clamp per axis from the texture fetch constant (bits 10–15 of word 0).
+
+Backgrounds, cliffs, foliage, light shafts and the HUD come out right. What is left needs the real shaders rather than hand-written ones: the animated "patch" vertex shader `6C6D2FF1…` (characters: position, color and 4 texcoord streams) and render-to-texture passes. That is the job of the Vulkan renderer, which runs the SPIR-V produced by XenosRecomp.

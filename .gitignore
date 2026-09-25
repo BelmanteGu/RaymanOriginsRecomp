@@ -49,3 +49,4 @@ android/.gradle/
 android/local.properties
 tools/forks/xenosrecomp/
 tools/forks/plume/
+tools/native_renderer/dumpview

@@ -16,11 +16,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <algorithm>
 #include <map>
 #include <mutex>
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <vector>
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -30,6 +33,7 @@
 #endif
 
 extern uint8_t* g_rayman_membase;  // hooks.cpp
+uint8_t* g_rayman_physbase = nullptr;  // set in RaymanApp::OnPostSetup
 
 namespace {
 
@@ -37,7 +41,8 @@ constexpr uint32_t kDeviceVertexShader = 0x3310;
 constexpr uint32_t kDevicePixelShader = 0x330C;
 
 bool Enabled() {
-  static const bool enabled = std::getenv("RAYMAN_NATIVE_CAPTURE") != nullptr;
+  static const bool enabled = std::getenv("RAYMAN_NATIVE_CAPTURE") != nullptr ||
+                              std::getenv("RAYMAN_NATIVE_DUMP") != nullptr;
   return enabled;
 }
 
@@ -50,6 +55,7 @@ uint32_t LoadBE32(uint32_t guest_address) {
 struct ShaderInfo {
   uint64_t hash;
   bool vertex;
+  std::vector<uint8_t> container;  // copied at creation: the game frees its buffer
 };
 
 struct DrawKey {
@@ -62,6 +68,7 @@ struct DrawKey {
 };
 
 std::mutex g_mutex;
+FILE* g_dump = nullptr;  // open while a frame is being dumped
 std::unordered_map<uint32_t, ShaderInfo> g_shaders;  // guest shader object -> info
 std::map<DrawKey, int> g_frameDraws;
 int g_frameDrawCount = 0;
@@ -78,9 +85,15 @@ void RecordShader(uint32_t object, uint32_t function, bool vertex) {
   if (!object || !function) {
     return;
   }
-  uint64_t hash = HashShader(function);
+  uint32_t size = LoadBE32(function + 4) + LoadBE32(function + 8);
+  if (size > (1u << 20)) {
+    return;  // not a shader container
+  }
+  uint64_t hash = XXH3_64bits(g_rayman_membase + function, size);
   std::lock_guard lock(g_mutex);
-  g_shaders[object] = {hash, vertex};
+  g_shaders[object] = {hash, vertex,
+                       std::vector<uint8_t>(g_rayman_membase + function,
+                                            g_rayman_membase + function + size)};
   CAPTURE_LOG("%s shader 0x%08X hash %016llX", vertex ? "vertex" : "pixel", object,
               (unsigned long long)hash);
 }
@@ -90,7 +103,15 @@ uint64_t ShaderHash(uint32_t object) {
   return it == g_shaders.end() ? 0 : it->second.hash;
 }
 
-void RecordDraw(int entry, uint32_t device, uint32_t primitive) {
+void DumpDraw(int entry, const PPCContext& ctx);
+
+void RecordDraw(int entry, const PPCContext& ctx) {
+  uint32_t device = ctx.r3.u32;
+  uint32_t primitive = ctx.r4.u32;
+  if (g_dump) {
+    std::lock_guard lock(g_mutex);
+    DumpDraw(entry, ctx);
+  }
   uint32_t vs = LoadBE32(device + kDeviceVertexShader);
   uint32_t ps = LoadBE32(device + kDevicePixelShader);
   std::lock_guard lock(g_mutex);
@@ -102,6 +123,105 @@ void RecordDraw(int entry, uint32_t device, uint32_t primitive) {
   ++g_frameDrawCount;
 }
 
+
+// ---- Frame dump (RAYMAN_NATIVE_DUMP=<frame>) ----
+// Writes captures/native_frame.bin: every draw of that frame with its device
+// state, then the guest memory the draws read (indices, vertex buffers,
+// textures) and the shader containers. Offline input for the native renderer
+// (tools/native_renderer). The file holds game data: keep it out of git.
+constexpr uint32_t kDumpBegin = 0x480, kDumpEnd = 0x3700;
+constexpr uint32_t kDeviceIndexBuffer = 0x320C;
+
+uint32_t g_dumpDraws = 0;
+std::map<uint32_t, uint32_t> g_dumpRanges;  // physical address -> size
+
+void Put32(uint32_t v) { std::fwrite(&v, 4, 1, g_dump); }
+void Put64(uint64_t v) { std::fwrite(&v, 8, 1, g_dump); }
+
+uint32_t ToPhysical(uint32_t guest) {
+  return (guest & 0x1FFFFFFF) + (guest >= 0xE0000000u ? 0x1000u : 0u);
+}
+
+void AddRange(uint32_t physical, uint32_t size) {
+  if (!size || size > 16u << 20 || physical >= 0x20000000u) {
+    return;
+  }
+  auto& current = g_dumpRanges[physical];
+  current = std::max(current, size);
+}
+
+void DumpDraw(int entry, const PPCContext& ctx) {
+  uint32_t device = ctx.r3.u32;
+  uint32_t vs = LoadBE32(device + kDeviceVertexShader);
+  uint32_t ps = LoadBE32(device + kDevicePixelShader);
+  uint32_t ib = LoadBE32(device + kDeviceIndexBuffer);
+  uint32_t ibWord0 = ib ? LoadBE32(ib) : 0;
+  uint32_t ibAddress = ib ? LoadBE32(ib + 0x18) : 0;
+  Put32(0x57415244);  // 'DRAW'
+  Put32(entry);
+  Put32(ctx.r4.u32); Put32(ctx.r5.u32); Put32(ctx.r6.u32); Put32(ctx.r7.u32); Put32(ctx.r8.u32);
+  Put64(ShaderHash(vs)); Put64(ShaderHash(ps));
+  Put32(ib); Put32(ibWord0); Put32(ibAddress);
+  std::fwrite(g_rayman_membase + device + kDumpBegin, 1, kDumpEnd - kDumpBegin, g_dump);
+  ++g_dumpDraws;
+
+  if (entry == 0 && ibAddress) {
+    uint32_t indexSize = (ibWord0 & 0x80000000u) ? 4 : 2;
+    AddRange(ToPhysical(ibAddress) + ctx.r6.u32 * indexSize, ctx.r7.u32 * indexSize);
+  }
+  // Fetch constants: vertex fetch (type 3, 2 dwords) and texture fetch (type 2, 6 dwords).
+  // D3D binds stream s to vertex fetch 95 - s and sampler t to texture fetch t.
+  for (uint32_t v = 80; v < 96; ++v) {
+    uint32_t d0 = LoadBE32(device + kDumpBegin + v * 8);
+    uint32_t d1 = LoadBE32(device + kDumpBegin + v * 8 + 4);
+    if ((d0 & 3) == 3) {
+      AddRange(d0 & 0x1FFFFFFC, ((d1 >> 2) & 0xFFFFFF) * 4);
+    }
+  }
+  for (uint32_t t = 0; t < 16; ++t) {
+    uint32_t base = device + kDumpBegin + t * 24;
+    uint32_t d0 = LoadBE32(base), d1 = LoadBE32(base + 4), d2 = LoadBE32(base + 8);
+    uint32_t d5 = LoadBE32(base + 20);
+    if ((d0 & 3) != 2) {
+      continue;
+    }
+    uint32_t width = (d2 & 0x1FFF) + 1, height = ((d2 >> 13) & 0x1FFF) + 1;
+    // Bytes per 4x4 block by format: DXT1 8, DXT2-5 16, 8-bit 16, 16-bit 32, else 64.
+    uint32_t format = d1 & 0x3F;
+    uint32_t block = format == 0x12 ? 8 : (format == 0x13 || format == 0x14) ? 16 :
+                     format == 0x02 ? 16 : (format == 0x04 || format == 0x05) ? 32 : 64;
+    uint32_t bytes = ((width + 31) & ~31u) / 4 * (((height + 31) & ~31u) / 4) * block;
+    AddRange(d1 & 0xFFFFF000, bytes);
+    if (d5 & 0xFFFFF000) {
+      AddRange(d5 & 0xFFFFF000, bytes);
+    }
+  }
+}
+
+void FinishDump() {
+  uint64_t total = 0;
+  for (auto& [physical, size] : g_dumpRanges) {
+    if (total + size > (1ull << 30)) {
+      CAPTURE_LOG("frame dump: 1 GB cap reached, skipping 0x%08X (%u bytes)", physical, size);
+      continue;
+    }
+    total += size;
+    Put32(0x204D454D);  // 'MEM '
+    Put32(physical); Put32(size);
+    std::fwrite(g_rayman_physbase + physical, 1, size, g_dump);
+  }
+  for (auto& [object, info] : g_shaders) {
+    Put32(0x52444853);  // 'SHDR'
+    Put64(info.hash); Put32(info.vertex ? 1 : 0); Put32(uint32_t(info.container.size()));
+    std::fwrite(info.container.data(), 1, info.container.size(), g_dump);
+  }
+  Put32(0x20444E45);  // 'END '
+  std::fclose(g_dump);
+  g_dump = nullptr;
+  CAPTURE_LOG("frame dump written: %u draws, %zu memory ranges (%.1f MB), %zu shaders", g_dumpDraws,
+              g_dumpRanges.size(), total / 1048576.0, g_shaders.size());
+}
+
 }  // namespace
 
 // Called from the Present hook (hooks.cpp) once per game frame.
@@ -111,6 +231,28 @@ void RaymanNativeCaptureFrame() {
   }
   std::lock_guard lock(g_mutex);
   ++g_frame;
+  if (g_dump) {
+    FinishDump();
+  }
+  // Trigger: RAYMAN_NATIVE_DUMP=<frame>, or creating captures/dump_now while
+  // the game runs (checked every 30 frames; the file is removed when used).
+  bool trigger = false;
+  if (const char* target = std::getenv("RAYMAN_NATIVE_DUMP")) {
+    trigger = g_frame + 1 == std::strtoull(target, nullptr, 10);
+  }
+  if (!trigger && g_frame % 30 == 0) {
+    std::error_code ec;
+    trigger = std::filesystem::remove("captures/dump_now", ec);
+  }
+  if (trigger && g_rayman_physbase) {
+    std::filesystem::create_directories("captures");
+    g_dump = std::fopen("captures/native_frame.bin", "wb");
+    if (g_dump) {
+      std::fwrite("RNF1", 1, 4, g_dump);
+      g_dumpDraws = 0;
+      g_dumpRanges.clear();
+    }
+  }
   if (g_frame % 120 == 0) {
     CAPTURE_LOG("frame %llu: %d draws, %zu distinct (entry/prim/shaders), %d with an unknown shader, %zu shaders known",
                 (unsigned long long)g_frame, g_frameDrawCount, g_frameDraws.size(),
@@ -149,21 +291,21 @@ REX_HOOK_RAW(sub_826CD668) {
 
 REX_HOOK_RAW(sub_826D7588) {
   if (Enabled()) {
-    RecordDraw(0, ctx.r3.u32, ctx.r4.u32);
+    RecordDraw(0, ctx);
   }
   __imp__sub_826D7588(ctx, base);
 }
 
 REX_HOOK_RAW(sub_826D7170) {
   if (Enabled()) {
-    RecordDraw(1, ctx.r3.u32, ctx.r4.u32);
+    RecordDraw(1, ctx);
   }
   __imp__sub_826D7170(ctx, base);
 }
 
 REX_HOOK_RAW(sub_826D6C68) {
   if (Enabled()) {
-    RecordDraw(2, ctx.r3.u32, ctx.r4.u32);
+    RecordDraw(2, ctx);
   }
   __imp__sub_826D6C68(ctx, base);
 }
