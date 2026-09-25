@@ -7,6 +7,7 @@
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
 #include <rex/system/interfaces/graphics.h>
+#include <rex/system/xmemory.h>
 #include <rex/ui/presenter.h>
 
 #include <chrono>
@@ -17,6 +18,8 @@
 #include <thread>
 
 extern uint8_t* g_rayman_membase;  // hooks.cpp
+extern uint8_t* g_rayman_physbase;  // native_capture.cpp
+void RaymanNativeRendererInit();     // native_renderer.cpp
 
 class RaymanApp : public rex::ReXApp {
  public:
@@ -32,6 +35,8 @@ class RaymanApp : public rex::ReXApp {
   // (diagnóstico: permite ver a imagem sem acesso à janela).
   void OnPostSetup() override {
     g_rayman_membase = runtime() ? runtime()->virtual_membase() : nullptr;
+    g_rayman_physbase = runtime() && runtime()->memory() ? runtime()->memory()->physical_membase() : nullptr;
+    RaymanNativeRendererInit();
     if (!std::getenv("RAYMAN_CAPTURE")) {
       return;
     }

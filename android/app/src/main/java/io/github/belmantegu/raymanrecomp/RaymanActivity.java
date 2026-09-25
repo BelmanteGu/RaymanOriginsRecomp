@@ -3,6 +3,8 @@ package io.github.belmantegu.raymanrecomp;
 import android.app.AlertDialog;
 import android.content.SharedPreferences;
 import android.os.Bundle;
+import android.system.ErrnoException;
+import android.system.Os;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.ViewGroup;
@@ -51,10 +53,13 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
     @Override
     protected String[] getArguments() {
         List<String> args = new ArrayList<>();
-        args.add("--gpu_plugin=xenos");
+        SharedPreferences prefs = getSharedPreferences(TouchControls.PREFS, MODE_PRIVATE);
+        // Native renderer (default): no GPU emulation; the game's draws go to
+        // Vulkan with its own shaders as SPIR-V (files/spirv). Otherwise the
+        // Xenos GPU emulation renders.
+        args.add(nativeRenderer(prefs) ? "--gpu_plugin=null" : "--gpu_plugin=xenos");
         // Physical keyboards map to the controller (same bindings as desktop).
         args.add("--mnk_mode=true");
-        SharedPreferences prefs = getSharedPreferences(TouchControls.PREFS, MODE_PRIVATE);
         if (prefs.getBoolean(TouchControls.KEY_FILL, false)) {
             // Stretch to the whole screen: a 720p guest video mode with the
             // display's aspect ratio. The game still frames a 16:9 scene, so the
@@ -84,8 +89,27 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
         return args.toArray(new String[0]);
     }
 
+    static final String KEY_NATIVE = "native_renderer";
+
+    private boolean nativeRenderer(SharedPreferences prefs) {
+        return prefs.getBoolean(KEY_NATIVE, true);
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // Read by the native libraries (rex/src/native_renderer.cpp), so it has
+        // to be set before SDLActivity loads them.
+        SharedPreferences prefs = getSharedPreferences(TouchControls.PREFS, MODE_PRIVATE);
+        try {
+            if (nativeRenderer(prefs)) {
+                Os.setenv("RAYMAN_NATIVE_RENDER", "main", true);
+                Os.setenv("RAYMAN_NATIVE_SPIRV", new File(getExternalFilesDir(null), "spirv").getPath(), true);
+            } else {
+                Os.unsetenv("RAYMAN_NATIVE_RENDER");
+            }
+        } catch (ErrnoException e) {
+            Log.w(TAG, "setenv failed", e);
+        }
         super.onCreate(savedInstanceState);
         if (mLayout == null) {
             return;  // SDL failed to load and is showing its error dialog
@@ -119,6 +143,7 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
     public void onOpenSettings() {
         final SharedPreferences prefs = getSharedPreferences(TouchControls.PREFS, MODE_PRIVATE);
         final boolean fillBefore = prefs.getBoolean(TouchControls.KEY_FILL, false);
+        final boolean nativeBefore = nativeRenderer(prefs);
         int pad = Math.round(20 * getResources().getDisplayMetrics().density);
 
         LinearLayout box = new LinearLayout(this);
@@ -140,6 +165,11 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
         fill.setChecked(fillBefore);
         box.addView(fill);
 
+        final CheckBox nativeBox = new CheckBox(this);
+        nativeBox.setText(R.string.native_renderer);
+        nativeBox.setChecked(nativeBefore);
+        box.addView(nativeBox);
+
         new AlertDialog.Builder(this)
             .setTitle(R.string.settings_title)
             .setView(box)
@@ -149,9 +179,10 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
                     .putInt(TouchControls.KEY_OPACITY, opacity.getProgress() + 10)
                     .putInt(TouchControls.KEY_SCALE, size.getProgress() + 60)
                     .putBoolean(TouchControls.KEY_FILL, fill.isChecked())
+                    .putBoolean(KEY_NATIVE, nativeBox.isChecked())
                     .apply();
                 touchControls.applyPreferences();
-                if (fill.isChecked() != fillBefore) {
+                if (fill.isChecked() != fillBefore || nativeBox.isChecked() != nativeBefore) {
                     new AlertDialog.Builder(this)
                         .setMessage(R.string.restart_needed)
                         .setPositiveButton(android.R.string.ok, null)

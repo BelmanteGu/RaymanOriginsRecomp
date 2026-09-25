@@ -34,3 +34,45 @@ void RaymanAudioDump(PPCRegister& r4) {
   }
   std::fwrite(stereo, sizeof(stereo), 1, dump);
 }
+
+// ---- Frame pacing ----
+// sub_826D41B8 is the game's D3D Present (the only path to VdSwap, see
+// docs/PROGRESS.md section 7). Wrapping it gives the real game frame rate,
+// logged every 2 s: average FPS and the slowest frame.
+#include <rex/hook.h>
+
+#include <chrono>
+
+#if defined(__ANDROID__)
+#include <android/log.h>
+#define RAYMAN_LOG(...) __android_log_print(ANDROID_LOG_INFO, "RaymanPerf", __VA_ARGS__)
+#else
+#define RAYMAN_LOG(...) (std::fprintf(stderr, __VA_ARGS__), std::fputc('\n', stderr))
+#endif
+
+REX_EXTERN(__imp__sub_826D41B8);
+void RaymanNativeCaptureFrame();     // native_capture.cpp
+void RaymanNativeRendererPresent();  // native_renderer.cpp
+
+REX_HOOK_RAW(sub_826D41B8) {
+  using clock = std::chrono::steady_clock;
+  static clock::time_point window_start = clock::now(), last = window_start;
+  static int frames = 0;
+  static double worst_ms = 0;
+  __imp__sub_826D41B8(ctx, base);
+  RaymanNativeCaptureFrame();
+  RaymanNativeRendererPresent();
+  auto now = clock::now();
+  double ms = std::chrono::duration<double, std::milli>(now - last).count();
+  last = now;
+  worst_ms = ms > worst_ms ? ms : worst_ms;
+  ++frames;
+  double window = std::chrono::duration<double>(now - window_start).count();
+  if (window >= 2.0) {
+    RAYMAN_LOG("[perf] %.1f fps (avg %.1f ms, worst %.1f ms)", frames / window,
+               window * 1000.0 / frames, worst_ms);
+    window_start = now;
+    frames = 0;
+    worst_ms = 0;
+  }
+}

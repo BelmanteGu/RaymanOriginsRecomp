@@ -3,7 +3,7 @@
 # SDK boilerplate lives in generated/rexglue.cmake.
 
 cmake_minimum_required(VERSION 3.25)
-project(rayman LANGUAGES CXX)
+project(rayman LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +15,9 @@ set(RAYMAN_SOURCES
     src/main.cpp
     src/hooks.cpp
     src/android_touch.cpp
+    src/native_capture.cpp
+    src/native_renderer.cpp
+    ../tools/native_renderer/thirdparty/volk/volk.c
 )
 
 if(ANDROID)
@@ -38,3 +41,15 @@ if(ANDROID)
 endif()
 
 rexglue_setup_target(rayman GPU_PLUGINS xenos)
+
+if(ANDROID)
+    target_link_libraries(rayman PRIVATE log)
+endif()
+
+# Native renderer (tools/native_renderer): Vulkan through volk.
+target_include_directories(rayman PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools/native_renderer
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools/native_renderer/thirdparty/volk)
+target_compile_definitions(rayman PRIVATE VK_NO_PROTOTYPES VK_ENABLE_BETA_EXTENSIONS
+    $<$<PLATFORM_ID:Darwin>:VK_USE_PLATFORM_METAL_EXT>
+    $<$<PLATFORM_ID:Android>:VK_USE_PLATFORM_ANDROID_KHR>)
