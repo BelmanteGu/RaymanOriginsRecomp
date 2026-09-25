@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <thread>
 
@@ -35,7 +36,8 @@ class RaymanApp : public rex::ReXApp {
       return;
     }
     std::thread([this] {
-      std::system("mkdir -p captures");
+      std::error_code ec;
+      std::filesystem::create_directories("captures", ec);
       for (int n = 1; n <= 12; ++n) {
         std::this_thread::sleep_for(std::chrono::seconds(10));
         auto* graphics = runtime() ? runtime()->graphics_system() : nullptr;
