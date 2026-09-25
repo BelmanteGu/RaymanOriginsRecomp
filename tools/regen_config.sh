@@ -33,7 +33,13 @@ open(toml_path, "w").write(head + begin + open(gen_path).read() + end + tail)
 EOF
 rm "$CFG/functions.generated.toml"
 
-rm -rf "$P/recomp/ppc" && mkdir -p "$P/recomp/ppc"
-"$P/tools/XenonRecomp/build/XenonRecomp/XenonRecomp" "$CFG/rayman.toml" \
+# Gera numa pasta temporária e copia só o que mudou: arquivos idênticos mantêm
+# a data de modificação e o ninja não os recompila (rebuild completo leva ~10 min).
+rm -rf "$P/recomp/ppc.new" && mkdir -p "$P/recomp/ppc.new" "$P/recomp/ppc"
+sed 's|out_directory_path = "../ppc"|out_directory_path = "../ppc.new"|' "$CFG/rayman.toml" > "$CFG/rayman.gen.toml"
+"$P/tools/XenonRecomp/build/XenonRecomp/XenonRecomp" "$CFG/rayman.gen.toml" \
     "$P/tools/XenonRecomp/XenonUtils/ppc_context.h" > "$P/recomp/recomp.log" 2>&1
+rm "$CFG/rayman.gen.toml"
 echo "recomp.log: $(grep -vc 'Recompiling functions' "$P/recomp/recomp.log") avisos"
+echo "arquivos alterados: $(rsync -rc --delete --out-format='%n' "$P/recomp/ppc.new/" "$P/recomp/ppc/" | wc -l | tr -d ' ')"
+rm -rf "$P/recomp/ppc.new"
