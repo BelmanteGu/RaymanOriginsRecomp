@@ -8,4 +8,4 @@ game_root = "../private/game"
 [entrypoint]
 file_path = "../private/game/default.xex"
 out_directory_path = "generated/default"
-includes = ["rayman_hints.toml"]
+includes = ["rayman_hints.toml", "rayman_hooks.toml"]

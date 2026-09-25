@@ -15,6 +15,8 @@
 #include <string>
 #include <thread>
 
+extern uint8_t* g_rayman_membase;  // hooks.cpp
+
 class RaymanApp : public rex::ReXApp {
  public:
   using rex::ReXApp::ReXApp;
@@ -28,6 +30,7 @@ class RaymanApp : public rex::ReXApp {
   // Com RAYMAN_CAPTURE=1, salva o frame do jogo a cada 10 s em captures/frame_NNN.ppm
   // (diagnóstico: permite ver a imagem sem acesso à janela).
   void OnPostSetup() override {
+    g_rayman_membase = runtime() ? runtime()->virtual_membase() : nullptr;
     if (!std::getenv("RAYMAN_CAPTURE")) {
       return;
     }

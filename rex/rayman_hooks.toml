@@ -1,0 +1,8 @@
+# Hooks de diagnóstico do Rayman Origins (ReXGlue).
+
+# Chamada a XAudioSubmitRenderDriverFrame (r3 = driver, r4 = amostras):
+# com RAYMAN_AUDIO_DUMP=arquivo, grava o áudio que o jogo entrega (estéreo float32, 48 kHz).
+[[midasm_hook]]
+address = 0x825E1358
+name = "RaymanAudioDump"
+registers = ["r4"]

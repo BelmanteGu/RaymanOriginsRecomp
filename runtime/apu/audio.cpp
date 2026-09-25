@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 #include "apu/audio.h"
@@ -116,7 +117,9 @@ static uint32_t XAudioUnregisterRenderDriverClient(uint32_t driver)
 // 256 amostras x 6 canais (FL, FR, C, LFE, RL, RR), float big-endian, planar.
 static uint32_t XAudioSubmitRenderDriverFrame(uint32_t driver, const be<float>* samples)
 {
-    if (g_sink && samples)
+    // Diagnóstico: RAYMAN_AUDIO_DUMP=arquivo grava o estéreo (float32, 48 kHz) recebido.
+    static FILE* dump = [] { const char* path = getenv("RAYMAN_AUDIO_DUMP"); return path ? fopen(path, "wb") : nullptr; }();
+    if ((g_sink || dump) && samples)
     {
         float stereo[256 * 2];
         for (int i = 0; i < 256; i++)
@@ -127,7 +130,10 @@ static uint32_t XAudioSubmitRenderDriverFrame(uint32_t driver, const be<float>* 
             stereo[i * 2 + 0] = fl + 0.707f * c + 0.707f * rl;
             stereo[i * 2 + 1] = fr + 0.707f * c + 0.707f * rr;
         }
-        g_sink(stereo, 256);
+        if (g_sink)
+            g_sink(stereo, 256);
+        if (dump)
+            fwrite(stereo, sizeof(stereo), 1, dump);
     }
     (void)driver;
     return 0;
