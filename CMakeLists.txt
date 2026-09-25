@@ -9,7 +9,8 @@ if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-set(PPC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/recomp/ppc)
+set(RAYMAN_PPC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/recomp/ppc CACHE PATH "Código recompilado")
+set(PPC_DIR ${RAYMAN_PPC_DIR})
 
 # XenonUtils (carregar/descomprimir o XEX). Como não é o projeto de topo, o
 # XenonRecomp não adiciona os testes.
@@ -29,6 +30,8 @@ target_include_directories(RaymanRecompLib PUBLIC
 # Mesmas flags do UnleashedRecompLib. -w: o código gerado produz milhares de avisos inofensivos.
 target_compile_options(RaymanRecompLib PRIVATE
     -O2 -fno-strict-aliasing -ffp-model=strict -w
+    # Chamada indireta verificada: informa o alvo do guest sem função recompilada.
+    -include ${CMAKE_CURRENT_SOURCE_DIR}/runtime/cpu/ppc_overrides.h
 )
 
 # ---- Stubs dos imports (gerados a partir do ppc_func_mapping.cpp) ----
@@ -50,6 +53,16 @@ add_executable(rayman
     runtime/kernel/heap.cpp
     runtime/kernel/page_heap.cpp
     runtime/kernel/memory_imports.cpp
+    runtime/kernel/objects.cpp
+    runtime/kernel/thread.cpp
+    runtime/kernel/sync_imports.cpp
+    runtime/kernel/system_imports.cpp
+    runtime/kernel/guest_printf.cpp
+    runtime/kernel/file_system.cpp
+    runtime/kernel/xam_imports.cpp
+    runtime/kernel/net_imports.cpp
+    runtime/kernel/video_imports.cpp
+    runtime/gpu/command_processor.cpp
     thirdparty/o1heap/o1heap/o1heap.c
     ${IMPORT_STUBS}
 )

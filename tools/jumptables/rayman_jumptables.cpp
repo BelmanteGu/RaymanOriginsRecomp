@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <cstdlib>
 #include <set>
 #include <algorithm>
 #include <file.h>
@@ -240,6 +241,120 @@ namespace
     }
 }
 
+// Jump table absoluta sem guarda cmplwi/bgt logo antes (o índice foi validado
+// antes ou é garantido pelo compilador). Padrão: lis/addi (tabela) +
+// rlwinm rX, rIdx, 2, 0, 29 + lwzx + mtctr + bctr. Sem guarda não há tamanho:
+// contamos entradas enquanto apontam para dentro da função [fnStart, fnEnd).
+// Uma entrada fora da função indica tabela de ponteiros de função: rejeitada.
+static Fail ResolveUnguarded(const Image& image, const Section& text, uint32_t bctrAddr,
+                             uint32_t fnStart, uint32_t fnEnd, Switch& out)
+{
+    ppc_insn in;
+    auto insnAt = [&](uint32_t a) {
+        ppc::Disassemble(image.Find(a), a, in);
+        return in.opcode != nullptr;
+    };
+
+    // Início da janela: logo depois do último desvio antes do bctr.
+    uint32_t windowStart = bctrAddr;
+    for (int i = 1; i <= 16; i++)
+    {
+        uint32_t a = bctrAddr - 4 * i;
+        if (a < fnStart || !insnAt(a))
+            break;
+        uint32_t id = in.opcode->id;
+        const char* n = in.opcode->name;
+        if (n[0] == 'b' && id != PPC_INST_BCTR) // qualquer desvio encerra o bloco
+            break;
+        if (id == PPC_INST_BCTR)
+            break;
+        windowStart = a;
+    }
+
+    Val regs[32];
+    uint32_t idx = UINT32_MAX, idxSetAt = 0, ctrReg = UINT32_MAX;
+    for (uint32_t a = windowStart; a < bctrAddr; a += 4)
+    {
+        if (!insnAt(a))
+            return Fail::Unsupported;
+        const uint32_t* o = in.operands;
+        Val v;
+        switch (in.opcode->id)
+        {
+        case PPC_INST_NOP:
+            continue;
+        case PPC_INST_LIS:
+            v.kind = Val::Const; v.c = o[1] << 16;
+            break;
+        case PPC_INST_ADDI:
+            if (regs[o[1]].kind != Val::Const) { v.kind = Val::Unknown; break; }
+            v.kind = Val::Const; v.c = regs[o[1]].c + o[2];
+            break;
+        case PPC_INST_RLWINM:
+            if (o[2] == 2 && o[3] == 0 && o[4] == 29 && regs[o[1]].kind == Val::Unknown && idx == UINT32_MAX)
+            {
+                idx = o[1];
+                idxSetAt = a;
+                v.kind = Val::Index; v.shift = 2;
+            }
+            else
+                v.kind = Val::Unknown;
+            break;
+        case PPC_INST_LWZX:
+        {
+            const Val& ra = regs[o[1]];
+            const Val& rb = regs[o[2]];
+            const Val* tbl = ra.kind == Val::Const ? &ra : rb.kind == Val::Const ? &rb : nullptr;
+            const Val* ix = ra.kind == Val::Index ? &ra : rb.kind == Val::Index ? &rb : nullptr;
+            if (!tbl || !ix || ix->shift != 2) { v.kind = Val::Unknown; break; }
+            v.kind = Val::Loaded; v.table = tbl->c; v.elem = 4;
+            break;
+        }
+        case PPC_INST_MTCTR:
+            ctrReg = o[0];
+            continue;
+        default:
+        {
+            const char* n = in.opcode->name;
+            if (n[0] == 'f' || !strncmp(n, "lf", 2) || !strncmp(n, "st", 2) || !strncmp(n, "cmp", 3))
+                continue;
+            v.kind = Val::Unknown;
+            break;
+        }
+        }
+        if (idx != UINT32_MAX && o[0] == idx && a > idxSetAt)
+            return Fail::IndexClobbered; // o switch usa rIdx no bctr
+        regs[o[0]] = v;
+    }
+
+    if (ctrReg == UINT32_MAX || idx == UINT32_MAX)
+        return Fail::NoGuard;
+    const Val& t = regs[ctrReg];
+    if (t.kind != Val::Loaded || t.elem != 4)
+        return Fail::NoGuard;
+
+    const auto* tbl = static_cast<const uint8_t*>(image.Find(t.table));
+    if (!tbl)
+        return Fail::BadTable;
+
+    out = {};
+    out.base = windowStart;
+    out.r = idx;
+    out.kind = "absolute-unguarded";
+    for (uint32_t i = 0; i < 1024; i++)
+    {
+        uint32_t label = be32(tbl + 4 * i);
+        if (label < fnStart || label >= fnEnd || (label & 3))
+            break;
+        out.labels.push_back(label);
+    }
+    if (out.labels.size() < 2)
+        return Fail::LabelOutside;
+    out.def = out.labels[0];
+    (void)text;
+    return Fail::None;
+}
+
 int main(int argc, char** argv)
 {
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -253,6 +368,46 @@ int main(int argc, char** argv)
     auto image = Image::ParseImage(file.data(), file.size());
     const Section* text = image.Find(".text");
     if (!text) { printf("sem .text\n"); return 1; }
+
+    std::map<uint32_t, uint32_t> pdataFns; // início -> tamanho
+    const Section* pdata = image.Find(".pdata");
+    for (uint32_t off = 0; pdata && off + 8 <= pdata->size; off += 8)
+    {
+        uint32_t begin = be32(pdata->data + off);
+        uint32_t data = be32(pdata->data + off + 4);
+        pdataFns[begin] = ((data >> 8) & 0x3FFFFF) * 4; // FunctionLength (bits 8..29)
+    }
+
+    std::set<uint32_t> starts;
+    for (auto& [b, s] : pdataFns) starts.insert(b);
+    // Símbolos já conhecidos da imagem, como os thunks de import ("__imp__NtCreateFile"):
+    // uma função "por ponteiro" no mesmo endereço substituiria o import na tabela.
+    for (const auto& symbol : image.symbols) starts.insert(uint32_t(symbol.address));
+    for (uint32_t i = 0; i < text->size / 4; ++i)
+    {
+        uint32_t w = be32(text->data + 4 * i);
+        if ((w >> 26) == 18 && (w & 3) == 1) // bl (não absoluto)
+        {
+            int32_t off = (int32_t)((w & 0x03FFFFFC) << 6) >> 6;
+            uint32_t t = text->base + 4 * i + off;
+            if (inText(*text, t)) starts.insert(t);
+        }
+    }
+
+
+    // Limites da função que contém um endereço: entrada do .pdata ou, sem ela,
+    // o intervalo entre inícios conhecidos.
+    auto functionBounds = [&](uint32_t address, uint32_t& start, uint32_t& end) {
+        auto p = pdataFns.upper_bound(address);
+        if (p != pdataFns.begin())
+        {
+            --p;
+            if (address < p->first + p->second) { start = p->first; end = p->first + p->second; return; }
+        }
+        auto it = starts.upper_bound(address);
+        end = it == starts.end() ? text->base + text->size : *it;
+        start = it == starts.begin() ? text->base : *std::prev(it);
+    };
 
     std::vector<Switch> found;
     std::map<Fail, int> fails;
@@ -268,6 +423,14 @@ int main(int argc, char** argv)
 
         Switch sw;
         Fail f = Resolve(image, *text, a, sw);
+        if (f == Fail::NoGuard)
+        {
+            uint32_t fnStart, fnEnd;
+            functionBounds(a, fnStart, fnEnd);
+            Fail g = ResolveUnguarded(image, *text, a, fnStart, fnEnd, sw);
+            if (g == Fail::None)
+                f = Fail::None;
+        }
         if (f == Fail::None) found.push_back(std::move(sw));
         else
         {
@@ -318,28 +481,6 @@ int main(int argc, char** argv)
     // fim = próximo início conhecido. Se o .pdata já cobre os labels, nada a fazer.
     if (argc >= 4)
     {
-        std::map<uint32_t, uint32_t> pdataFns; // início -> tamanho
-        const Section* pdata = image.Find(".pdata");
-        for (uint32_t off = 0; pdata && off + 8 <= pdata->size; off += 8)
-        {
-            uint32_t begin = be32(pdata->data + off);
-            uint32_t data = be32(pdata->data + off + 4);
-            pdataFns[begin] = ((data >> 8) & 0x3FFFFF) * 4; // FunctionLength (bits 8..29)
-        }
-
-        std::set<uint32_t> starts;
-        for (auto& [b, s] : pdataFns) starts.insert(b);
-        for (uint32_t i = 0; i < text->size / 4; ++i)
-        {
-            uint32_t w = be32(text->data + 4 * i);
-            if ((w >> 26) == 18 && (w & 3) == 1) // bl (não absoluto)
-            {
-                int32_t off = (int32_t)((w & 0x03FFFFFC) << 6) >> 6;
-                uint32_t t = text->base + 4 * i + off;
-                if (inText(*text, t)) starts.insert(t);
-            }
-        }
-
         std::string fnOut = "functions = [\n";
         int emitted = 0, covered = 0, broken = 0;
         std::set<uint32_t> done;
@@ -441,9 +582,107 @@ int main(int argc, char** argv)
             ++ctrFns;
         }
 
+        // Funções alcançadas só por ponteiro (métodos de vtable, callbacks): sem
+        // bl nem .pdata, o recompilador as absorve na função anterior e a tabela
+        // de chamadas indiretas fica sem entrada. Candidatos: endereços de código
+        // em dados e pares lis/addi no código, precedidos de terminador ou padding.
+        std::set<uint32_t> switchLabels;
+        std::map<uint32_t, uint32_t> switchReach; // base do switch -> maior label
+        for (const auto& sw : found)
+        {
+            uint32_t hi = 0;
+            for (uint32_t l : sw.labels) { switchLabels.insert(l); hi = std::max(hi, l); }
+            switchReach[sw.base] = hi;
+        }
+
+        std::set<uint32_t> pointerTargets(dataPtrs.begin(), dataPtrs.end());
+        const char* ptrMode = getenv("JT_PTR_MODE"); // bissecção: data | code | all (padrão)
+        bool useCodePtrs = !ptrMode || strcmp(ptrMode, "data") != 0;
+        if (ptrMode && !strcmp(ptrMode, "code")) pointerTargets.clear();
+        for (uint32_t i = 0; useCodePtrs && i + 1 < text->size / 4; ++i)
+        {
+            uint32_t w = be32(text->data + 4 * i);
+            if ((w >> 26) != 15 || ((w >> 16) & 0x1F) != 0) continue; // lis rD, hi
+            uint32_t rd = (w >> 21) & 0x1F, hi = w << 16;
+            for (uint32_t j = 1; j <= 6 && i + j < text->size / 4; ++j)
+            {
+                uint32_t w2 = be32(text->data + 4 * (i + j));
+                uint32_t op = w2 >> 26;
+                if ((op == 14 || op == 24) && ((w2 >> 16) & 0x1F) == rd) // addi/ori rX, rD, lo
+                {
+                    uint32_t lo = w2 & 0xFFFF;
+                    uint32_t target = op == 14 ? hi + uint32_t(int32_t(int16_t(lo))) : (hi | lo);
+                    if (inText(*text, target)) pointerTargets.insert(target);
+                    break;
+                }
+            }
+        }
+
+        auto isTerminatorOrPad = [](uint32_t w) {
+            return w == 0x4E800020 || w == 0x4E800420 || w == 0 || ((w >> 26) == 18 && (w & 1) == 0);
+        };
+
+        // Alvos de desvio condicional são labels internos: bc nunca sai da função.
+        std::set<uint32_t> branchTargets;
+        for (uint32_t i = 0; i < text->size / 4; ++i)
+        {
+            uint32_t w = be32(text->data + 4 * i);
+            if ((w >> 26) == 16 && (w & 3) == 0)
+                branchTargets.insert(text->base + 4 * i + uint32_t(int32_t(int16_t(w & 0xFFFC))));
+        }
+        // Dentro de uma função do .pdata (que tem tamanho exato), só o início é função.
+        auto insidePdataFunction = [&](uint32_t address) {
+            auto p = pdataFns.upper_bound(address);
+            if (p == pdataFns.begin()) return false;
+            --p;
+            return address > p->first && address < p->first + p->second;
+        };
+
+        std::set<uint32_t> allStarts = starts;
+        std::vector<uint32_t> newStarts;
+        for (uint32_t t : pointerTargets)
+        {
+            if (starts.count(t) || switchLabels.count(t) || t == text->base) continue;
+            if (branchTargets.count(t) || insidePdataFunction(t)) continue;
+            if (!isTerminatorOrPad(be32(text->data + (t - 4 - text->base)))) continue;
+            newStarts.push_back(t);
+            allStarts.insert(t);
+        }
+
+        if (const char* limit = getenv("JT_PTR_LIMIT")) // bissecção: só as N primeiras
+            newStarts.resize(std::min<size_t>(newStarts.size(), strtoul(limit, nullptr, 10)));
+        int ptrFns = 0;
+        for (uint32_t start : newStarts)
+        {
+            auto nIt = allStarts.upper_bound(start);
+            uint32_t nextStart = nIt == allStarts.end() ? text->base + text->size : *nIt;
+            uint32_t maxT = start, end = 0;
+            for (uint32_t pos = start; pos < nextStart; pos += 4)
+            {
+                uint32_t w = be32(text->data + (pos - text->base));
+                uint32_t op = w >> 26;
+                auto reach = switchReach.find(pos);
+                if (reach != switchReach.end()) maxT = std::max(maxT, reach->second);
+                bool terminator = w == 0x4E800020 || w == 0x4E800420 || w == 0;
+                if (op == 16 && (w & 3) == 0)
+                    maxT = std::max(maxT, pos + uint32_t(int32_t(int16_t(w & 0xFFFC))));
+                else if (op == 18 && (w & 3) == 0)
+                {
+                    uint32_t t = pos + uint32_t((int32_t)((w & 0x03FFFFFC) << 6) >> 6);
+                    if (t > pos && t < nextStart) maxT = std::max(maxT, t);
+                    else terminator = true;
+                }
+                if (terminator && pos >= maxT) { end = pos + 4; break; }
+            }
+            if (!end) end = nextStart;
+            snprintf(buf, sizeof(buf), "    { address = 0x%X, size = 0x%X }, # ptr\n", start, end - start);
+            fnOut += buf;
+            ++ptrFns;
+        }
+
         fnOut += "]\n";
-        printf("limites: %d cobertos pelo .pdata, %d funções com switch, %d com bdz, %d problemáticos\n",
-               covered, emitted, ctrFns, broken);
+        printf("limites: %d cobertos pelo .pdata, %d funções com switch, %d com bdz, %d por ponteiro, %d problemáticos\n",
+               covered, emitted, ctrFns, ptrFns, broken);
 
         FILE* ff = fopen(argv[3], "wb");
         fwrite(fnOut.data(), 1, fnOut.size(), ff);

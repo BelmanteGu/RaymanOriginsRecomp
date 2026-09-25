@@ -612,6 +612,43 @@ labels = [
     0x82532470,
 ]
 
+# absolute-unguarded
+[[switch]]
+base = 0x8253C42C
+r = 17
+default = 0x8253C4E4
+labels = [
+    0x8253C4E4,
+    0x8253C664,
+    0x8253C718,
+    0x8253C7AC,
+    0x8253C83C,
+    0x8253C8E4,
+    0x8253C9A4,
+    0x8253CA64,
+    0x8253CB20,
+    0x8253CBC4,
+    0x8253CC2C,
+    0x8253CC58,
+    0x8253CC64,
+    0x8253CD58,
+    0x8253CDC4,
+    0x8253CE20,
+    0x8253CEA8,
+    0x8253CFC4,
+    0x8253D2EC,
+    0x8253D4EC,
+    0x8253D554,
+    0x8253D6D8,
+    0x8253D760,
+    0x8253D80C,
+    0x8253D834,
+    0x8253D914,
+    0x8253D9C0,
+    0x8253D9C8,
+    0x8253DB1C,
+]
+
 # shortoffset
 [[switch]]
 base = 0x82546A0C
@@ -3984,6 +4021,35 @@ labels = [
     0x827602B8,
 ]
 
+# absolute-unguarded
+[[switch]]
+base = 0x827602D0
+r = 18
+default = 0x82760368
+labels = [
+    0x82760368,
+    0x82760368,
+    0x827604C4,
+    0x82760368,
+    0x82760368,
+    0x82760450,
+    0x82760368,
+    0x827603DC,
+    0x82760368,
+    0x82760368,
+    0x827604C4,
+    0x827604C4,
+    0x82760368,
+    0x82760368,
+    0x827604C4,
+    0x827604C4,
+    0x827604C4,
+    0x827604C4,
+    0x82760368,
+    0x82760368,
+    0x82760368,
+]
+
 # absolute
 [[switch]]
 base = 0x82760AE4
@@ -4229,6 +4295,45 @@ labels = [
     0x827D8F30,
     0x827D8F38,
     0x827D8F40,
+]
+
+# absolute-unguarded
+[[switch]]
+base = 0x827E05B8
+r = 16
+default = 0x827E0678
+labels = [
+    0x827E0678,
+    0x827E0804,
+    0x827E08B8,
+    0x827E094C,
+    0x827E09DC,
+    0x827E0A84,
+    0x827E0B44,
+    0x827E0C04,
+    0x827E0CC0,
+    0x827E0D64,
+    0x827E0DCC,
+    0x827E0DF8,
+    0x827E0E10,
+    0x827E0F10,
+    0x827E0F88,
+    0x827E0F90,
+    0x827E0FF8,
+    0x827E1080,
+    0x827E119C,
+    0x827E14E4,
+    0x827E14EC,
+    0x827E171C,
+    0x827E1798,
+    0x827E1934,
+    0x827E19A8,
+    0x827E1A74,
+    0x827E1A9C,
+    0x827E1B7C,
+    0x827E1C28,
+    0x827E1C30,
+    0x827E1DA0,
 ]
 
 # absolute
@@ -4852,6 +4957,40 @@ labels = [
     0x827F8DE0,
     0x827F8DFC,
     0x827F8DF8,
+]
+
+# absolute-unguarded
+[[switch]]
+base = 0x827FB468
+r = 11
+default = 0x827FB4E8
+labels = [
+    0x827FB4E8,
+    0x827FB4F0,
+    0x827FB4F8,
+    0x827FB500,
+    0x827FB508,
+    0x827FB510,
+    0x827FB518,
+    0x827FB520,
+    0x827FB528,
+    0x827FB530,
+    0x827FB538,
+    0x827FB540,
+    0x827FB548,
+    0x827FB550,
+    0x827FB558,
+    0x827FB560,
+    0x827FB568,
+    0x827FB570,
+    0x827FB578,
+    0x827FB580,
+    0x827FB588,
+    0x827FB590,
+    0x827FB598,
+    0x827FB5A0,
+    0x827FB5A8,
+    0x827FB5B0,
 ]
 
 # absolute
@@ -6934,6 +7073,30 @@ labels = [
     0x82926AB0,
     0x82926B28,
     0x82926B50,
+]
+
+# absolute-unguarded
+[[switch]]
+base = 0x829272A8
+r = 11
+default = 0x82927300
+labels = [
+    0x82927300,
+    0x82927300,
+    0x82927300,
+    0x82927300,
+    0x82927300,
+    0x82927300,
+    0x82927300,
+    0x82927300,
+    0x82927300,
+    0x82927300,
+    0x82927300,
+    0x82927300,
+    0x82927318,
+    0x82927318,
+    0x82927300,
+    0x82927300,
 ]
 
 # shortoffset

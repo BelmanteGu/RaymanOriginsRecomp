@@ -43,6 +43,60 @@ int main(int argc, char** argv)
 
     auto file = LoadFile(argv[1]);
 
+    // Modo "addrref": diag <xex> addrref <lo> <hi> — pares lis/addi(ori) no código que formam um endereço em [lo, hi).
+    if (argc >= 5 && strcmp(argv[2], "addrref") == 0)
+    {
+        auto img = Image::ParseImage(file.data(), file.size());
+        const Section* text = img.Find(".text");
+        uint32_t lo = strtoul(argv[3], nullptr, 16), hi = strtoul(argv[4], nullptr, 16);
+        auto word = [&](uint32_t i) { const uint8_t* p = text->data + 4 * i; return uint32_t((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]); };
+        for (uint32_t i = 0; i + 1 < text->size / 4; i++)
+        {
+            uint32_t w = word(i);
+            if ((w >> 26) != 15 || ((w >> 16) & 0x1F) != 0) continue;
+            uint32_t rd = (w >> 21) & 0x1F, high = w << 16;
+            for (uint32_t j = 1; j <= 8 && i + j < text->size / 4; j++)
+            {
+                uint32_t w2 = word(i + j), op = w2 >> 26;
+                if ((op == 14 || op == 24 || op == 32) && ((w2 >> 16) & 0x1F) == rd) // addi/ori/lwz rX, lo(rD)
+                {
+                    uint32_t v = op == 24 ? (high | (w2 & 0xFFFF)) : high + uint32_t(int32_t(int16_t(w2 & 0xFFFF)));
+                    if (v >= lo && v < hi)
+                        printf("  0x%08zX: 0x%08X (%s)\n", text->base + 4 * (i + j), v, op == 32 ? "lwz" : op == 24 ? "ori" : "addi");
+                    break;
+                }
+            }
+        }
+        return 0;
+    }
+
+    // Modo "xref": diag <xex> xref <valor> — onde o valor aparece como palavra de 32 bits nas seções.
+    if (argc >= 4 && strcmp(argv[2], "xref") == 0)
+    {
+        auto img = Image::ParseImage(file.data(), file.size());
+        uint32_t value = strtoul(argv[3], nullptr, 16);
+        for (const auto& s : img.sections)
+        {
+            if (s.data == nullptr || s.base + s.size > img.base + img.size) continue;
+            for (uint32_t off = 0; off + 4 <= s.size; off += 4)
+            {
+                const uint8_t* p = s.data + off;
+                if (uint32_t((p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]) == value)
+                {
+                    printf("  %s 0x%08zX:", s.name.c_str(), s.base + off);
+                    for (int k = -4; k <= 4; k++)
+                    {
+                        const uint8_t* q = p + 4 * k;
+                        if (q < s.data || q + 4 > s.data + s.size) continue;
+                        printf(" %08X", uint32_t((q[0] << 24) | (q[1] << 16) | (q[2] << 8) | q[3]));
+                    }
+                    printf("\n");
+                }
+            }
+        }
+        return 0;
+    }
+
     // Modo "callers": diag <xex> callers <endereço> — lista os bl que apontam para o endereço.
     if (argc >= 4 && strcmp(argv[2], "callers") == 0)
     {

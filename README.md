@@ -7,15 +7,17 @@ An unofficial effort to statically recompile the Xbox 360 version of **Rayman Or
 
 ## Status
 
-Early work in progress. Nothing is playable yet.
+Work in progress. Nothing is visible or playable yet, but the recompiled game boots, loads its bundles and runs its render loop (frames are submitted to a GPU backend that doesn't draw yet).
 
 | Phase | Goal | Status |
 |---|---|---|
 | 1 | XenonRecomp translates the whole executable to C++ with no warnings | ✅ Done |
-| 2 | The recompiled code and a minimal runtime compile and link | 🚧 In progress |
-| 3 | Boot test: the game allocates memory, starts threads and opens its `.ipk` archives | ⏳ |
-| 4 | Graphics (Xenos → Vulkan), audio (XMA), input | ⏳ |
+| 2 | The recompiled code and a minimal runtime compile and link | ✅ Done |
+| 3 | Boot test: the game allocates memory, starts threads and opens its `.ipk` archives | ✅ Done |
+| 4 | Graphics (Xenos → Vulkan), audio (XMA), input | 🚧 Render loop reached; drawing next |
 | 5 | Android (NDK, Vulkan, touch/gamepad) | ⏳ |
+
+Technical write-up of every step, including the bugs found along the way: [docs/PROGRESS.md](docs/PROGRESS.md).
 
 The roadmap lives in the [issues](../../issues).
 

@@ -26,9 +26,10 @@ static void Print(const char* fmt, ...)
 
 static void OnCrash(int sig, siginfo_t* info, void* ucontextRaw)
 {
-    uintptr_t pc = 0;
+    uintptr_t pc = 0, hostLr = 0;
 #if defined(__APPLE__) && defined(__aarch64__)
     pc = static_cast<ucontext_t*>(ucontextRaw)->uc_mcontext->__ss.__pc;
+    hostLr = static_cast<ucontext_t*>(ucontextRaw)->uc_mcontext->__ss.__lr;
 #elif defined(__APPLE__) && defined(__x86_64__)
     pc = static_cast<ucontext_t*>(ucontextRaw)->uc_mcontext->__ss.__rip;
 #elif defined(__linux__) && defined(__aarch64__)
@@ -52,11 +53,25 @@ static void OnCrash(int sig, siginfo_t* info, void* ucontextRaw)
     else
         Print("[crash] pc do host %p\n", reinterpret_cast<void*>(pc));
 
+    // Com pc nulo (chamada indireta para função sem tradução), o lr do host
+    // aponta para quem fez a chamada.
+    Dl_info caller{};
+    if (hostLr != 0 && dladdr(reinterpret_cast<void*>(hostLr), &caller) && caller.dli_sname)
+        Print("[crash] chamado por %s+0x%lX\n", caller.dli_sname, (unsigned long)(hostLr - reinterpret_cast<uintptr_t>(caller.dli_saddr)));
+
     if (PPCContext* ctx = GetPPCContext())
         Print("[crash] guest: lr=%08X r1=%08X r3=%08X r4=%08X r5=%08X r31=%08X\n",
               uint32_t(ctx->lr), ctx->r1.u32, ctx->r3.u32, ctx->r4.u32, ctx->r5.u32, ctx->r31.u32);
 
     _exit(128 + sig);
+}
+
+[[noreturn]] void PpcMissingIndirectCall(uint32_t target, PPCContext& ctx)
+{
+    Print("\n[crash] chamada indireta para 0x%08X, que não tem função recompilada\n", target);
+    Print("[crash] guest: lr=%08X r1=%08X r3=%08X r4=%08X r5=%08X r31=%08X\n",
+          uint32_t(ctx.lr), ctx.r1.u32, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r31.u32);
+    _exit(134);
 }
 
 void InstallCrashHandler()

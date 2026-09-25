@@ -27,3 +27,6 @@ tools/patches/
 .flowforge/
 .forgeview/
 .DS_Store
+build-bisect/
+recomp/ppc-bisect/
+recomp/bisect-config/
