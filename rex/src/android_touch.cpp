@@ -84,9 +84,12 @@ JNIEXPORT void JNICALL Java_io_github_belmantegu_raymanrecomp_TouchControls_nati
   }
   SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_LEFTX, ToAxis(left_x));
   SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_LEFTY, ToAxis(left_y));
-  // Triggers range 0..32767.
+  // A virtual pad's trigger axes use the whole joystick range: released is
+  // SDL_JOYSTICK_AXIS_MIN, pressed is SDL_JOYSTICK_AXIS_MAX. Sending 0 for
+  // "released" reads as a half-pressed trigger, and RT is run in this game.
+  float t = std::clamp(right_trigger, 0.0f, 1.0f);
   SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,
-                             Sint16(std::clamp(right_trigger, 0.0f, 1.0f) * 32767.0f));
+                             Sint16(SDL_JOYSTICK_AXIS_MIN + t * (SDL_JOYSTICK_AXIS_MAX - SDL_JOYSTICK_AXIS_MIN)));
 }
 
 }  // extern "C"
