@@ -19,6 +19,7 @@
 
 extern uint8_t* g_rayman_membase;  // hooks.cpp
 extern uint8_t* g_rayman_physbase;  // native_capture.cpp
+void RaymanNativeRendererInit();     // native_renderer.cpp
 
 class RaymanApp : public rex::ReXApp {
  public:
@@ -35,6 +36,7 @@ class RaymanApp : public rex::ReXApp {
   void OnPostSetup() override {
     g_rayman_membase = runtime() ? runtime()->virtual_membase() : nullptr;
     g_rayman_physbase = runtime() && runtime()->memory() ? runtime()->memory()->physical_membase() : nullptr;
+    RaymanNativeRendererInit();
     if (!std::getenv("RAYMAN_CAPTURE")) {
       return;
     }

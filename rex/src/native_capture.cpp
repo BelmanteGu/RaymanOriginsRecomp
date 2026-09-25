@@ -9,6 +9,10 @@
 // emulation keeps rendering. Addresses and device offsets: docs/D3D_MAP.md.
 #include <rex/hook.h>
 
+#include "vk_renderer.h"  // native::DrawCall
+
+void RaymanNativeRendererDraw(const native::DrawCall& call);  // native_renderer.cpp
+
 #define XXH_INLINE_ALL
 #include <xxhash.h>
 
@@ -42,7 +46,8 @@ constexpr uint32_t kDevicePixelShader = 0x330C;
 
 bool Enabled() {
   static const bool enabled = std::getenv("RAYMAN_NATIVE_CAPTURE") != nullptr ||
-                              std::getenv("RAYMAN_NATIVE_DUMP") != nullptr;
+                              std::getenv("RAYMAN_NATIVE_DUMP") != nullptr ||
+                              std::getenv("RAYMAN_NATIVE_RENDER") != nullptr;
   return enabled;
 }
 
@@ -108,6 +113,19 @@ void DumpDraw(int entry, const PPCContext& ctx);
 void RecordDraw(int entry, const PPCContext& ctx) {
   uint32_t device = ctx.r3.u32;
   uint32_t primitive = ctx.r4.u32;
+  {
+    uint32_t ib = LoadBE32(device + 0x320C);
+    uint64_t vsHash, psHash;
+    {
+      std::lock_guard lock(g_mutex);
+      vsHash = ShaderHash(LoadBE32(device + kDeviceVertexShader));
+      psHash = ShaderHash(LoadBE32(device + kDevicePixelShader));
+    }
+    native::DrawCall call{g_rayman_membase + device + native::kStateBegin, uint32_t(entry), primitive,
+                          ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, vsHash, psHash,
+                          ib ? LoadBE32(ib) : 0, ib ? LoadBE32(ib + 0x18) : 0};
+    RaymanNativeRendererDraw(call);
+  }
   if (g_dump) {
     std::lock_guard lock(g_mutex);
     DumpDraw(entry, ctx);

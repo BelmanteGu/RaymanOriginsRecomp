@@ -41,6 +41,19 @@ struct DrawCall {
 
 class Renderer {
  public:
+  struct Layout {
+    uint32_t stride;
+    std::vector<VkVertexInputAttributeDescription> attributes;  // binding 0
+    std::vector<uint32_t> byteOrderedOffsets;  // 4-byte attributes kept in memory byte order
+  };
+  struct Recorded {
+    VkPipeline pipeline;
+    VkDeviceAddress vsConst, psConst, shared;
+    size_t vertexOffset, indexOffset;
+    uint32_t indexCount;
+    VkIndexType indexType;
+    uint32_t firstVertex, vertexCount;  // non-indexed draws
+  };
   using ShaderSource = std::function<std::vector<uint32_t>(uint64_t hash, bool vertex)>;
   using SurfaceFactory = std::function<VkSurfaceKHR(VkInstance)>;
 
@@ -95,10 +108,32 @@ class Renderer {
   // Captures one draw: copies its vertices, indices and constants right away,
   // since the game reuses the memory after the call.
   void Draw(const DrawCall& d) {
-    if (d.entry != 0 || d.primitive != 4 || !d.ibAddress) { ++stats_.skipped; return; }
+    bool indexed = d.entry == 0;
+    if ((d.entry != 0 && d.entry != 1) || d.primitive != 4 || (indexed && !d.ibAddress)) { ++stats_.skipped; return; }
     VkShaderModule vsm = Module(d.vs, true), psm = Module(d.ps, false);
     const Layout* layout = LayoutFor(d.vs);
     if (!vsm || !psm || !layout) { ++stats_.skipped; return; }
+    if (!indexed) {
+      // DrawVertices: r5 = start vertex, r6 = vertex count.
+      const uint8_t* vf = d.state + 95 * 8;
+      uint32_t vbase = xenos::BE32(vf) & 0x1FFFFFFC, vsize = ((xenos::BE32(vf + 4) >> 2) & 0xFFFFFF) * 4;
+      const uint8_t* vb = memory_(vbase, vsize);
+      if (!vb || !vsize || vertices_.used + vsize > vertices_.size || constants_.used + 16384 > constants_.size) {
+        ++stats_.skipped;
+        return;
+      }
+      Recorded r{};
+      r.vertexOffset = CopyVertices(vb, vsize, *layout);
+      r.firstVertex = d.baseVertex;
+      r.vertexCount = d.startIndex;
+      FillConstants(d, r);
+      uint32_t blend = xenos::BE32(d.state + (0x2934 - kStateBegin) + 4);
+      r.pipeline = Pipeline(d.vs, d.ps, vsm, psm, *layout, blend);
+      if (!r.pipeline) { ++stats_.skipped; return; }
+      frameDraws_.push_back(r);
+      ++stats_.draws;
+      return;
+    }
     uint32_t isize = (d.ibWord0 & 0x80000000u) ? 4 : 2;
     uint32_t ibPhys = (d.ibAddress & 0x1FFFFFFF) + (d.ibAddress >= 0xE0000000u ? 0x1000 : 0);
     const uint8_t* idx = memory_(ibPhys + d.startIndex * isize, d.indexCount * isize);
@@ -111,12 +146,7 @@ class Renderer {
       return;
     }
     Recorded r{};
-    r.vertexOffset = vertices_.Alloc(vsize, 16);
-    for (uint32_t i = 0; i + 4 <= vsize; i += 4) {
-      uint32_t w = xenos::BE32(vb + i);
-      std::memcpy(vertices_.map + r.vertexOffset + i, &w, 4);
-    }
-    r.vertexOffset += size_t(d.baseVertex) * layout->stride;
+    r.vertexOffset = CopyVertices(vb, vsize, *layout) + size_t(d.baseVertex) * layout->stride;
     r.indexOffset = indices_.Alloc(d.indexCount * isize, 4);
     for (uint32_t i = 0; i < d.indexCount; ++i) {
       if (isize == 2) {
@@ -129,6 +159,29 @@ class Renderer {
     }
     r.indexCount = d.indexCount;
     r.indexType = isize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+    FillConstants(d, r);
+    uint32_t blend = xenos::BE32(d.state + (0x2934 - kStateBegin) + 4);  // RB_BLENDCONTROL0
+    r.pipeline = Pipeline(d.vs, d.ps, vsm, psm, *layout, blend);
+    if (!r.pipeline) { ++stats_.skipped; return; }
+    frameDraws_.push_back(r);
+    ++stats_.draws;
+  }
+
+  // Vertex data: 8in32 swap of the whole range, then back to memory order for
+  // 8-bit integer attributes (e.g. blend indices), which Vulkan reads byte-wise.
+  size_t CopyVertices(const uint8_t* vb, uint32_t vsize, const Layout& layout) {
+    size_t at = vertices_.Alloc(vsize, 16);
+    for (uint32_t i = 0; i + 4 <= vsize; i += 4) {
+      uint32_t w = xenos::BE32(vb + i);
+      std::memcpy(vertices_.map + at + i, &w, 4);
+    }
+    for (uint32_t offset : layout.byteOrderedOffsets)
+      for (uint32_t v = 0; v + layout.stride <= vsize; v += layout.stride)
+        std::memcpy(vertices_.map + at + v + offset, vb + v + offset, 4);
+    return at;
+  }
+
+  void FillConstants(const DrawCall& d, Recorded& r) {
     r.vsConst = CopyConstants(d.state + (0x780 - kStateBegin));
     r.psConst = CopyConstants(d.state + (0x1780 - kStateBegin));
     size_t sharedAt = constants_.Alloc(512, 256);
@@ -145,11 +198,6 @@ class Renderer {
       std::memcpy(shared + 192 + s * 4, &samp, 4);
     }
     r.shared = constants_.address + sharedAt;
-    uint32_t blend = xenos::BE32(d.state + (0x2934 - kStateBegin) + 4);  // RB_BLENDCONTROL0
-    r.pipeline = Pipeline(d.vs, d.ps, vsm, psm, *layout, blend);
-    if (!r.pipeline) { ++stats_.skipped; return; }
-    frameDraws_.push_back(r);
-    ++stats_.draws;
   }
 
   // Submits the frame. Presents to the window, or reads back RGBA8 into `readback`.
@@ -188,15 +236,26 @@ class Renderer {
       vkCmdPushConstants(cmd_, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 24, pc);
       VkDeviceSize vo = r.vertexOffset;
       vkCmdBindVertexBuffers(cmd_, 0, 1, &vertices_.buffer, &vo);
-      vkCmdBindIndexBuffer(cmd_, indices_.buffer, r.indexOffset, r.indexType);
-      vkCmdDrawIndexed(cmd_, r.indexCount, 1, 0, 0, 0);
+      if (r.indexCount) {
+        vkCmdBindIndexBuffer(cmd_, indices_.buffer, r.indexOffset, r.indexType);
+        vkCmdDrawIndexed(cmd_, r.indexCount, 1, 0, 0, 0);
+      } else {
+        vkCmdDraw(cmd_, r.vertexCount, 1, r.firstVertex, 0);
+      }
     }
     vkCmdEndRenderPass(cmd_);
-    if (!surface_ && readback) {
+    if (readback) {
       VkBufferImageCopy copy{};
       copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
       copy.imageExtent = {extent_.width, extent_.height, 1};
-      vkCmdCopyImageToBuffer(cmd_, offscreen_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback_.buffer, 1, &copy);
+      if (surface_) {
+        VkImage image = swapchainImages_[imageIndex];
+        Barrier(cmd_, image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        vkCmdCopyImageToBuffer(cmd_, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback_.buffer, 1, &copy);
+        Barrier(cmd_, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+      } else {
+        vkCmdCopyImageToBuffer(cmd_, offscreen_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback_.buffer, 1, &copy);
+      }
     }
     vkEndCommandBuffer(cmd_);
     VkCommandBuffer cmds[2] = {uploads_, cmd_};
@@ -224,8 +283,10 @@ class Renderer {
     }
     vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
     FreeFrame();
-    if (readback && !surface_) {
+    if (readback) {
       readback->assign(readback_.map, readback_.map + size_t(extent_.width) * extent_.height * 4);
+      if (surface_ && swapchainBgra_)
+        for (size_t i = 0; i + 3 < readback->size(); i += 4) std::swap((*readback)[i], (*readback)[i + 2]);
     }
     return true;
   }
@@ -251,17 +312,6 @@ class Renderer {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
-  };
-  struct Layout {
-    uint32_t stride;
-    std::vector<VkVertexInputAttributeDescription> attributes;  // binding 0
-  };
-  struct Recorded {
-    VkPipeline pipeline;
-    VkDeviceAddress vsConst, psConst, shared;
-    size_t vertexOffset, indexOffset;
-    uint32_t indexCount;
-    VkIndexType indexType;
   };
 
   bool Fail(const std::string& message) {
@@ -393,7 +443,7 @@ class Renderer {
     sc.imageColorSpace = format.colorSpace;
     sc.imageExtent = extent_;
     sc.imageArrayLayers = 1;
-    sc.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    sc.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     sc.preTransform = caps.currentTransform;
     sc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     sc.presentMode = VK_PRESENT_MODE_FIFO_KHR;
@@ -404,6 +454,9 @@ class Renderer {
     vkGetSwapchainImagesKHR(device_, swapchain_, &images, nullptr);
     std::vector<VkImage> list(images);
     vkGetSwapchainImagesKHR(device_, swapchain_, &images, list.data());
+    swapchainImages_ = list;
+    swapchainBgra_ = format.format == VK_FORMAT_B8G8R8A8_UNORM;
+    readback_ = CreateBuffer(size_t(extent_.width) * extent_.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     for (VkImage img : list) {
       VkImageViewCreateInfo v{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
       v.image = img;
@@ -676,6 +729,9 @@ class Renderer {
     if (in == std::vector<uint32_t>{0, 4, 8}) return &pct;
     if (in == std::vector<uint32_t>{0, 4}) return &grid;
     if (in == std::vector<uint32_t>{0, 4, 5, 6, 7, 8}) return &patch;
+    // Fonts: position, color, glyph indices (ubyte4), uv; 28 bytes.
+    static const Layout font{28, {{0, 0, f3, 0}, {8, 0, c, 12}, {9, 0, VK_FORMAT_R8G8B8A8_UINT, 16}, {4, 0, f2, 20}}, {16}};
+    if (in == std::vector<uint32_t>{0, 4, 8, 9}) return &font;
     return nullptr;
   }
 
@@ -778,6 +834,8 @@ class Renderer {
   VkCommandPool cmdPool_ = VK_NULL_HANDLE;
   VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
   std::vector<VkFramebuffer> framebuffers_;
+  std::vector<VkImage> swapchainImages_;
+  bool swapchainBgra_ = false;
   VkRenderPass renderPass_ = VK_NULL_HANDLE;
   Image offscreen_;
   VkFramebuffer offscreenFramebuffer_ = VK_NULL_HANDLE;
