@@ -94,6 +94,8 @@ class Renderer {
   const std::string& error() const { return error_; }
 
   struct Stats { uint32_t draws = 0, skipped = 0, pipelines = 0, textures = 0; };
+  // Why draws were skipped since the last call, e.g. "layout vs=...(0,4,8,9,12)" -> count.
+  std::map<std::string, uint32_t> TakeSkipReasons() { return std::move(skipReasons_); }
   const Stats& stats() const { return stats_; }
 
   // Starts recording a frame. Per-frame buffers are reused (one frame in flight).
@@ -109,10 +111,22 @@ class Renderer {
   // since the game reuses the memory after the call.
   void Draw(const DrawCall& d) {
     bool indexed = d.entry == 0;
-    if ((d.entry != 0 && d.entry != 1) || d.primitive != 4 || (indexed && !d.ibAddress)) { ++stats_.skipped; return; }
+    if ((d.entry != 0 && d.entry != 1) || d.primitive != 4 || (indexed && !d.ibAddress)) {
+      Skip("draw entry " + std::to_string(d.entry) + " primitive " + std::to_string(d.primitive));
+      return;
+    }
     VkShaderModule vsm = Module(d.vs, true), psm = Module(d.ps, false);
+    if (!vsm || !psm) {
+      Skip(std::string("missing SPIR-V ") + Hex(!vsm ? d.vs : d.ps) + (!vsm ? "_vs" : "_ps"));
+      return;
+    }
     const Layout* layout = LayoutFor(d.vs);
-    if (!vsm || !psm || !layout) { ++stats_.skipped; return; }
+    if (!layout) {
+      std::string in;
+      for (uint32_t l : inputs_[d.vs]) in += (in.empty() ? "" : ",") + std::to_string(l);
+      Skip("vertex layout " + Hex(d.vs) + " inputs (" + in + ")");
+      return;
+    }
     if (!indexed) {
       // DrawVertices: r5 = start vertex, r6 = vertex count.
       const uint8_t* vf = d.state + 95 * 8;
@@ -313,6 +327,16 @@ class Renderer {
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
   };
+
+  void Skip(const std::string& reason) {
+    ++stats_.skipped;
+    ++skipReasons_[reason];
+  }
+  static std::string Hex(uint64_t v) {
+    char buf[20];
+    std::snprintf(buf, sizeof(buf), "%016llX", (unsigned long long)v);
+    return buf;
+  }
 
   bool Fail(const std::string& message) {
     error_ = message;
@@ -854,6 +878,7 @@ class Renderer {
   std::unordered_map<uint64_t, VkShaderModule> modules_;
   std::unordered_map<uint64_t, std::vector<uint32_t>> inputs_;
   std::unordered_map<std::string, VkPipeline> pipelines_;
+  std::map<std::string, uint32_t> skipReasons_;
 };
 
 }  // namespace native

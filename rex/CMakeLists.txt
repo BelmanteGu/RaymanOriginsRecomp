@@ -50,4 +50,6 @@ endif()
 target_include_directories(rayman PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../tools/native_renderer
     ${CMAKE_CURRENT_SOURCE_DIR}/../tools/native_renderer/thirdparty/volk)
-target_compile_definitions(rayman PRIVATE VK_NO_PROTOTYPES VK_ENABLE_BETA_EXTENSIONS)
+target_compile_definitions(rayman PRIVATE VK_NO_PROTOTYPES VK_ENABLE_BETA_EXTENSIONS
+    $<$<PLATFORM_ID:Darwin>:VK_USE_PLATFORM_METAL_EXT>
+    $<$<PLATFORM_ID:Android>:VK_USE_PLATFORM_ANDROID_KHR>)

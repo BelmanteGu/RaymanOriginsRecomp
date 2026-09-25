@@ -1,0 +1,39 @@
+From 06679d977e4e370a6b05a1e8135c1c4c77cfec88 Mon Sep 17 00:00:00 2001
+From: BelmanteGu <gustavobelmanteribeiro@gmail.com>
+Date: Fri, 25 Sep 2026 12:00:40 -0400
+Subject: [PATCH 4/4] rexgpu-null: no presenter, leave the window to the native
+ renderer
+
+---
+ src/graphics/null/null_gpu.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/graphics/null/null_gpu.cpp b/src/graphics/null/null_gpu.cpp
+index aa963dd..b9cde04 100644
+--- a/src/graphics/null/null_gpu.cpp
++++ b/src/graphics/null/null_gpu.cpp
+@@ -4,8 +4,8 @@
+  *
+  * Keeps the guest's GPU protocol alive (ring buffer, fences, event writes,
+  * interrupts, vblank) but draws nothing: for games whose rendering is done by a
+- * native renderer hooked at the D3D level. Presentation stays available (the
+- * window exists), the guest output is simply never filled.
++ * native renderer hooked at the D3D level. No presenter is created, so the
++ * native renderer owns the window's surface.
+  *
+  * @license     BSD 3-Clause License (same as ReXGlue)
+  */
+@@ -41,6 +41,10 @@ class NullGraphicsSystem : public GraphicsSystem {
+  public:
+   std::string name() const override { return "Null"; }
+ 
++  // No presenter: the window is left to the native renderer, which draws into
++  // it directly. SetupGuestGpu then builds a headless provider.
++  X_STATUS SetupPresentation(::rex::ui::WindowedAppContext*) override { return X_STATUS_SUCCESS; }
++
+  protected:
+   void CreateProvider(bool with_presentation) override {
+     provider_ = rex::ui::vulkan::VulkanProvider::Create(true, with_presentation);
+-- 
+2.39.3 (Apple Git-146)
+

@@ -51,3 +51,4 @@ tools/forks/xenosrecomp/
 tools/forks/plume/
 tools/native_renderer/dumpview
 tools/native_renderer/vkrender
+tools/native_renderer/shaderprep

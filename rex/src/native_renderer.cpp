@@ -1,11 +1,13 @@
-// Native renderer, in-game (shadow mode): with RAYMAN_NATIVE_RENDER=1 a second
-// window draws every game frame with the native renderer
-// (tools/native_renderer/vk_renderer.h: Vulkan + the game's SPIR-V shaders),
-// next to the Xenos emulation, which keeps running for comparison.
+// Native renderer, in-game. Draws every game frame with the native renderer
+// (tools/native_renderer/vk_renderer.h: Vulkan + the game's SPIR-V shaders).
+//   RAYMAN_NATIVE_RENDER=1     second window, next to the Xenos emulation (shadow mode)
+//   RAYMAN_NATIVE_RENDER=main  the game's own window; run with --gpu_plugin=null so
+//                              no GPU emulation runs and nothing else presents to it
 //
 // SPIR-V is read from RAYMAN_NATIVE_SPIRV (default: private/native/shaders_by_hash,
 // relative to the repository root), as <HASH>_vs.spv / <HASH>_ps.spv.
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_metal.h>
 #include <SDL3/SDL_vulkan.h>
 
 #include <chrono>
@@ -50,31 +52,68 @@ void RaymanNativeRendererInit() {
   if (!Enabled() || g_renderer) {
     return;
   }
-  if (!SDL_Vulkan_GetVkGetInstanceProcAddr() && !SDL_Vulkan_LoadLibrary(nullptr)) {
-    NATIVE_LOG("SDL could not load Vulkan: %s", SDL_GetError());
-    return;
+  bool mainWindow = std::string(std::getenv("RAYMAN_NATIVE_RENDER")) == "main";
+  std::vector<const char*> exts;
+  PFN_vkGetInstanceProcAddr loader = nullptr;
+  native::Renderer::SurfaceFactory makeSurface;
+  if (mainWindow) {
+    // The game's window was not created for Vulkan: make the surface from its
+    // native handle, the way ReXGlue's presenter does.
+    int count = 0;
+    SDL_Window** windows = SDL_GetWindows(&count);
+    g_window = count > 0 ? windows[0] : nullptr;
+    SDL_free(windows);
+    if (!g_window) {
+      NATIVE_LOG("no game window");
+      return;
+    }
+    exts.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+#if defined(__APPLE__)
+    exts.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
+    makeSurface = [](VkInstance instance) {
+      SDL_MetalView view = SDL_Metal_CreateView(g_window);
+      VkMetalSurfaceCreateInfoEXT info{VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT};
+      info.pLayer = static_cast<const CAMetalLayer*>(SDL_Metal_GetLayer(view));
+      VkSurfaceKHR surface = VK_NULL_HANDLE;
+      vkCreateMetalSurfaceEXT(instance, &info, nullptr, &surface);
+      return surface;
+    };
+#elif defined(__ANDROID__)
+    exts.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+    makeSurface = [](VkInstance instance) {
+      VkAndroidSurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
+      info.window = static_cast<ANativeWindow*>(SDL_GetPointerProperty(
+          SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+      VkSurfaceKHR surface = VK_NULL_HANDLE;
+      vkCreateAndroidSurfaceKHR(instance, &info, nullptr, &surface);
+      return surface;
+    };
+#endif
+  } else {
+    if (!SDL_Vulkan_GetVkGetInstanceProcAddr() && !SDL_Vulkan_LoadLibrary(nullptr)) {
+      NATIVE_LOG("SDL could not load Vulkan: %s", SDL_GetError());
+      return;
+    }
+    g_window = SDL_CreateWindow("Rayman Origins - native renderer", 960, 540,
+                                SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    if (!g_window) {
+      NATIVE_LOG("window: %s", SDL_GetError());
+      return;
+    }
+    Uint32 count = 0;
+    const char* const* sdlExts = SDL_Vulkan_GetInstanceExtensions(&count);
+    exts.assign(sdlExts, sdlExts + count);
+    loader = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
+    makeSurface = [](VkInstance instance) {
+      VkSurfaceKHR surface = VK_NULL_HANDLE;
+      if (!SDL_Vulkan_CreateSurface(g_window, instance, nullptr, &surface)) return VkSurfaceKHR(VK_NULL_HANDLE);
+      return surface;
+    };
   }
-  g_window = SDL_CreateWindow("Rayman Origins - native renderer", 960, 540,
-                              SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
-  if (!g_window) {
-    NATIVE_LOG("window: %s", SDL_GetError());
-    return;
-  }
-  Uint32 count = 0;
-  const char* const* sdlExts = SDL_Vulkan_GetInstanceExtensions(&count);
-  std::vector<const char*> exts(sdlExts, sdlExts + count);
-  auto loader = reinterpret_cast<PFN_vkGetInstanceProcAddr>(SDL_Vulkan_GetVkGetInstanceProcAddr());
   int w = 0, h = 0;
   SDL_GetWindowSizeInPixels(g_window, &w, &h);
   auto* renderer = new native::Renderer();
-  bool ok = renderer->Init(
-      loader, exts,
-      [](VkInstance instance) {
-        VkSurfaceKHR surface = VK_NULL_HANDLE;
-        if (!SDL_Vulkan_CreateSurface(g_window, instance, nullptr, &surface)) return VkSurfaceKHR(VK_NULL_HANDLE);
-        return surface;
-      },
-      uint32_t(w), uint32_t(h));
+  bool ok = renderer->Init(loader, exts, makeSurface, uint32_t(w), uint32_t(h));
   if (!ok) {
     NATIVE_LOG("renderer init failed: %s", renderer->error().c_str());
     delete renderer;
@@ -146,5 +185,6 @@ void RaymanNativeRendererPresent() {
     auto& s = g_renderer->stats();
     NATIVE_LOG("native frame %d: %u draws, %u skipped, %u pipelines, %u textures", frames, s.draws, s.skipped,
                s.pipelines, s.textures);
+    for (auto& [reason, n] : g_renderer->TakeSkipReasons()) NATIVE_LOG("  skipped x%u: %s", n, reason.c_str());
   }
 }

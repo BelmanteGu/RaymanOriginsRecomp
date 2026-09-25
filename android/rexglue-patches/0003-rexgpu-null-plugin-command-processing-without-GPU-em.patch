@@ -1,7 +1,7 @@
 From f75880271f4cc87e0558fa7104bf904b47db4f86 Mon Sep 17 00:00:00 2001
 From: BelmanteGu <gustavobelmanteribeiro@gmail.com>
 Date: Fri, 25 Sep 2026 11:55:28 -0400
-Subject: [PATCH] rexgpu-null plugin (command processing without GPU
+Subject: [PATCH 3/4] rexgpu-null plugin (command processing without GPU
  emulation); jthread/stop_token fallback for older libc++
 
 ---
