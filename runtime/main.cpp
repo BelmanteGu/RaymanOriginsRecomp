@@ -3,11 +3,14 @@
 // entry point recompilado. Imports ainda não implementados só logam (stubs).
 #include <cstdio>
 #include <pthread.h>
+#include <cstdlib>
+#include <unistd.h>
 #include "memory.h"
 #include "loader.h"
 #include "crash_handler.h"
 #include "kernel/memory_layout.h"
 #include "kernel/thread.h"
+#include "host/platform.h"
 
 // A thread principal do macOS tem só 8 MB de pilha; o código recompilado usa a
 // pilha do host a cada chamada do guest, então rodamos o jogo numa thread maior.
@@ -64,6 +67,14 @@ int main(int argc, char** argv)
         return 1;
     }
     pthread_attr_destroy(&attr);
+
+    // Janela e eventos na thread principal (exigência do macOS); o jogo roda na dele.
+    if (getenv("RAYMAN_HEADLESS") == nullptr && InitPlatform())
+    {
+        RunPlatformLoop();
+        ShutdownPlatform();
+        _exit(0); // janela fechada: encerra sem esperar as threads do jogo
+    }
     pthread_join(thread, nullptr);
     return 0;
 }

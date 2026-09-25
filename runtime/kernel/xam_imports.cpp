@@ -7,6 +7,8 @@
 #include <filesystem>
 #include <string>
 #include "file_system.h"
+#include "host/platform.h"
+#include <atomic>
 #include "function.h"
 #include "objects.h"
 #include "xbox_defs.h"
@@ -340,11 +342,11 @@ static uint32_t XamNotifyCreateListener(uint64_t mask, uint32_t maxVersion)
     return CreateHandle(listener);
 }
 
-// ---- Input (#15): controle 1 conectado e em repouso até termos SDL ----
+// ---- Input (#15): controle físico ou teclado via SDL (host/platform.cpp) ----
 
 static bool Connected(uint32_t userIndex)
 {
-    return userIndex == 0;
+    return IsPadConnected(userIndex);
 }
 
 static void FillCapabilities(XAMINPUT_CAPABILITIES* caps)
@@ -391,16 +393,34 @@ static uint32_t XamInputGetState(uint32_t userIndex, uint32_t flags, XAMINPUT_ST
     (void)flags;
     if (!Connected(userIndex))
         return X_ERROR_DEVICE_NOT_CONNECTED;
-    static uint32_t packet = 0;
-    memset(state, 0, sizeof(*state));
-    state->dwPacketNumber = __builtin_bswap32(++packet);
+    static std::atomic<uint32_t> packet{ 0 };
+    static PadState last;
+    PadState pad = GetPadState();
+    if (memcmp(&pad, &last, sizeof(pad)) != 0)
+    {
+        last = pad;
+        packet++; // o número do pacote muda quando o estado muda
+    }
+    // Estrutura do guest em big-endian.
+    state->dwPacketNumber = __builtin_bswap32(packet.load());
+    state->Gamepad.wButtons = __builtin_bswap16(pad.buttons);
+    state->Gamepad.bLeftTrigger = pad.leftTrigger;
+    state->Gamepad.bRightTrigger = pad.rightTrigger;
+    state->Gamepad.sThumbLX = int16_t(__builtin_bswap16(uint16_t(pad.thumbLX)));
+    state->Gamepad.sThumbLY = int16_t(__builtin_bswap16(uint16_t(pad.thumbLY)));
+    state->Gamepad.sThumbRX = int16_t(__builtin_bswap16(uint16_t(pad.thumbRX)));
+    state->Gamepad.sThumbRY = int16_t(__builtin_bswap16(uint16_t(pad.thumbRY)));
     return X_ERROR_SUCCESS;
 }
 
 static uint32_t XamInputSetState(uint32_t userIndex, uint32_t flags, XAMINPUT_VIBRATION* vibration)
 {
-    (void)flags; (void)vibration;
-    return Connected(userIndex) ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
+    (void)flags;
+    if (!Connected(userIndex))
+        return X_ERROR_DEVICE_NOT_CONNECTED;
+    if (vibration)
+        SetPadVibration(__builtin_bswap16(vibration->wLeftMotorSpeed), __builtin_bswap16(vibration->wRightMotorSpeed));
+    return X_ERROR_SUCCESS;
 }
 
 static uint32_t XamInputRawState(uint32_t userIndex, uint32_t flags, void* state)

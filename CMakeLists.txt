@@ -16,6 +16,12 @@ set(PPC_DIR ${RAYMAN_PPC_DIR})
 # XenonRecomp não adiciona os testes.
 add_subdirectory(tools/XenonRecomp EXCLUDE_FROM_ALL)
 
+# SDL3 estático (janela, input, som), também usado no Android.
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+add_subdirectory(thirdparty/SDL EXCLUDE_FROM_ALL)
+
 # ---- Código recompilado (gerado pelo XenonRecomp em recomp/ppc) ----
 file(GLOB RAYMAN_PPC_SOURCES CONFIGURE_DEPENDS ${PPC_DIR}/ppc_recomp.*.cpp)
 
@@ -64,6 +70,7 @@ add_executable(rayman
     runtime/kernel/video_imports.cpp
     runtime/gpu/command_processor.cpp
     runtime/apu/audio.cpp
+    runtime/host/platform.cpp
     thirdparty/o1heap/o1heap/o1heap.c
     ${IMPORT_STUBS}
 )
@@ -73,7 +80,7 @@ target_include_directories(rayman PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/o1heap/o1heap
 )
 target_compile_options(rayman PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O1 -g -fno-strict-aliasing -ffp-model=strict>)
-target_link_libraries(rayman PRIVATE RaymanRecompLib XenonUtils)
+target_link_libraries(rayman PRIVATE RaymanRecompLib XenonUtils SDL3::SDL3-static)
 if (APPLE)
     # Exporta os símbolos (sub_XXXXXXXX) para o relatório de crash usar dladdr.
     target_link_options(rayman PRIVATE -Wl,-export_dynamic)
