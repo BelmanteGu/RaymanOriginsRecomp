@@ -38,3 +38,5 @@ rex/out/
 rex/build/
 rex/captures/
 rex/*.log
+tools/diag/imagedump
+tools/analysis/__pycache__/

@@ -132,9 +132,68 @@ Our driver pacing (one callback every 5.333 ms) is correct, so the game's mixer 
 
 Expect a recent high-end phone (Snapdragon 8 Gen 1 class or better).
 
+## 7. Toward a native renderer (static study)
+
+ReXGlue draws by emulating the Xenos GPU (PM4 command stream, EDRAM, texture untiling in shaders), like Xenia. That works on an M1, but it is the heaviest part to carry to phone GPUs. Unleashed Recompiled took the other road: it replaces the Direct3D library linked into the executable with a translation layer over a modern RHI. This section maps what that road looks like for Rayman Origins. Everything here comes from static analysis. The game was not run.
+
+Tools (the outputs are derived from the game and stay in `private/data/`):
+
+- `tools/diag/imagedump`: writes the loaded XEX image as a flat file.
+- `tools/analysis/callgraph.py`: call graph of the ReXGlue output (35,169 functions, 73,962 calls).
+- `tools/analysis/xrefs.py`: `lis`/`addi` data references, mapped to their containing functions.
+
+### What is linked
+
+The XEX header's static library list: `D3D9`, `D3DX9`, `XGRAPHC`, `XAUDIO2`, `XMCORE` and `XAPILIB`, all from **XDK 2.0.20871**, built with MSVC 16.0.11886.
+
+### No RTTI, but UbiArt names its classes
+
+Only four RTTI type descriptors exist, all `std::` exceptions: the engine is built without RTTI. UbiArt keeps its own class-name strings instead (`GFXAdapter_Directx9`, `Adapter_Savegame_x360`, `SoundAdapter_*`, …), plus some source paths. Following the code that references those strings gives the same orientation RTTI would.
+
+### The graphics layers
+
+| Layer | Where | How it was found |
+|---|---|---|
+| UbiArt `GFXAdapter_Directx9` | code in `0x82120000`–`0x82140000`; vtable of **157 methods** at `0x820020A8` | references to the class-name string at `0x820007CC`; vtables scanned as runs of function pointers |
+| Shader loading | `0x821316A8`, `0x821317B0` (`"Shaders/compiled/x360/%ls"`), registration at `0x8213A640` | string references |
+| Frame present | engine `0x82139EE8` → `0x826D41B8` → `0x826D3A50` (the only caller of `VdSwap`) | callers of the kernel's `Vd*` exports, which only D3D calls |
+| D3D9 core | around `0x826C0000`–`0x826F0000`: device init `0x826DCE48` (`VdInitializeEngines`), ring buffer `0x826DB368`, display mode `0x826DCC78` | same |
+| D3DX9 | around `0x82600000`–`0x826C0000`, including the HLSL compiler (linked, never needed at runtime: every shader ships precompiled) | `D3DX:` and compiler strings |
+
+The adapter calls **114 distinct D3D/D3DX functions**, which bounds the API surface a translation layer has to cover. Part of the Xbox 360 D3D API is inline (state setters that write straight into the device structure), so the first implementation task is to separate the out-of-line calls from inline state and decide which layer to hook: the 114 D3D functions (Unleashed's approach, whose GPL-3.0 layer we may reuse) or the adapter's 157 virtual methods.
+
+### Shaders: 31 files, 18 KB
+
+Every game shader is in `bootsequence_X360.ipk` under `shaders/compiled/x360/`:
+
+| Family | Pixel | Vertex |
+|---|---|---|
+| `renderpct` (main 2D/2.5D renderer) | 8 | 14 |
+| `afterfx` (post effects) | 2 | 2 |
+| `font` | 2 | 1 |
+| `movie` | 1 | 1 |
+
+Each `.ckd` is a single, uncompressed XDK compiled-shader container (`0x102A1100` pixel, `0x102A1101` vertex), the input format of [XenosRecomp](https://github.com/hedge-dev/XenosRecomp) (MIT). Four more shaders are embedded in the executable's `.rdata` (`0x8207E0A8`–`0x8207E7D8`): D3D's own clear/resolve shaders. The whole set can be recompiled offline at build time, with no runtime shader translation.
+
+IPK layout (version 3, as observed): header `magic 0x50EC12BA, version, ?, data base, file count`, then entries `{offset count, size, compressed size, timestamp u64, offsets u64[count], name length, UTF-16BE path}`. Data is at `data base + offset`.
+
+### Why the Mac is the right test bed
+
+The recompiled code already runs as **ARM64** on Apple Silicon (SIMDe for VMX), which is the Android CPU architecture. Boot, threads, file I/O, audio and the title screen are all validated on ARM64, so most of the Android risk is exercised daily. What the Mac does not exercise is texture compression: Apple Silicon Macs decode BC (DXT), most phone GPUs don't.
+
+### Plan
+
+The kernel, audio (XMA), input and file system stay on ReXGlue. Only the GPU changes. The app can hand ReXGlue its own `GraphicsSystem` (`config_.graphics`) instead of the Xenos plugin.
+
+1. **Shadow mode.** Hook the D3D entry points and pass every call through to the original code, so the Xenos emulation keeps drawing, while mirroring them to a native renderer on [plume](https://github.com/renderbag/plume) (MIT: Metal, Vulkan, D3D12) in a second window. First milestone: `Present` clears to a color. Second: textured quads (the Ubisoft logo and the title screen are pure 2D). `RAYMAN_CAPTURE` frames from both paths are compared.
+2. **Shaders.** Batch-run XenosRecomp over the 31 + 4 shaders, and count failures early.
+3. **Textures.** A per-platform conversion layer from day one: untile, endian swap, then BC as-is (Mac, desktop) or BC → RGBA8/ASTC/ETC2 (Android). The Mac build can force the Android path to test it.
+4. **Replace mode.** When shadow frames match, stop passing calls through and run without the Xenos plugin: native Metal on the Mac.
+5. **Android.** Same renderer on plume's Vulkan backend, with the ReXGlue runtime built for `android-arm64` (section 6).
+
 ## Next steps
 
+- Native renderer, step 1 of section 7 (shadow mode on the Mac).
 - Play past the title screen and check levels, movies (#16) and saves.
-- Performance and correctness on MoltenVK.
 - Validate the ported VMX instructions against Xenia's PPC tests (#4).
-- Android (#17), as described in section 6.
+- Android (#17), as described in sections 6 and 7.
