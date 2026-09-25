@@ -5,17 +5,38 @@ An unofficial effort to statically recompile the Xbox 360 version of **Rayman Or
 > [!IMPORTANT]
 > **This repository contains no game code or assets.** You need your own legally obtained copy of Rayman Origins for Xbox 360. Everything derived from the game (the executable, the recompiled C++ and the game data) is generated or read locally from your own dump and must never be committed, uploaded or shared here.
 
+<p align="center">
+  <img src="docs/media/android-s23-touch-controls.jpg" alt="Rayman Origins in-game on a Galaxy S23, with the on-screen controller" width="820">
+  <br>
+  <em>In-game on a Galaxy S23 (Android 16), with the on-screen controller</em>
+</p>
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/media/android-s23-title.jpg" alt="Title screen on a Galaxy S23" width="400"><br><em>Android: Galaxy S23, Adreno 740</em></td>
+    <td align="center"><img src="docs/media/macos-title.jpg" alt="Title screen on macOS" width="400"><br><em>macOS: Apple M1</em></td>
+  </tr>
+</table>
+
 ## Status
 
-**The title screen renders on macOS (Apple Silicon)**: the UbiArt logo, then "Press START", with audio. Gameplay past the title screen hasn't been tested yet.
+**The game runs on macOS (Apple Silicon) and on Android (Galaxy S23)** with graphics, audio, movies and controls. On Android there is an on-screen controller; physical controllers and keyboards work too. The game's code is recompiled to native ARM64. Graphics still go through Xbox 360 GPU emulation (ReXGlue's Xenos backend on Vulkan), and that is the next thing to replace: see the [roadmap](#roadmap).
 
 | Phase | Goal | Status |
 |---|---|---|
 | 1 | XenonRecomp translates the whole executable to C++ with no warnings | ✅ Done |
 | 2 | The recompiled code and a minimal runtime compile and link | ✅ Done |
 | 3 | Boot test: the game allocates memory, starts threads and opens its `.ipk` archives | ✅ Done |
-| 4 | Graphics, audio, input | ✅ Title screen via [ReXGlue](https://github.com/rexglue/rexglue-sdk) (Vulkan/MoltenVK) |
-| 5 | Android (NDK, Vulkan, touch/gamepad) | ⏳ |
+| 4 | Graphics, audio, input | ✅ Via [ReXGlue](https://github.com/rexglue/rexglue-sdk) (Vulkan/MoltenVK), GPU emulated |
+| 5 | Android (NDK, Vulkan, touch/gamepad) | ✅ Runs on a Galaxy S23: [docs/ANDROID.md](docs/ANDROID.md) |
+| 6 | Native renderer (no GPU emulation) | ⏳ Next |
+
+## Roadmap
+
+1. **Native renderer.** Translate the game's Direct3D 9 calls straight to Vulkan and Metal (plume), with shaders converted ahead of time by XenosRecomp. See [docs/PROGRESS.md](docs/PROGRESS.md) section 7.
+2. **True widescreen.** Patch the game's camera so a 19.5:9 phone shows more of the level instead of stretching.
+3. **Performance on phones.** Measure and tune on the Galaxy S23.
+4. **Polish.** Optional Turnip driver for Adreno, an in-app game folder picker, and suspend/resume.
 
 Technical write-up of every step, including the bugs found along the way: [docs/PROGRESS.md](docs/PROGRESS.md).
 
