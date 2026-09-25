@@ -14,6 +14,9 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <set>
+#include <filesystem>
+#include <algorithm>
 #include "cpu/guest_context.h"
 #include "function.h"
 #include "kernel/thread.h"
@@ -30,7 +33,7 @@ enum : uint32_t
     PM4_REG_TO_MEM = 0x3E, PM4_INDIRECT_BUFFER = 0x3F, PM4_COND_WRITE = 0x45,
     PM4_EVENT_WRITE = 0x46, PM4_ME_INIT = 0x48, PM4_INTERRUPT = 0x54,
     PM4_EVENT_WRITE_SHD = 0x58, PM4_EVENT_WRITE_EXT = 0x5A, PM4_EVENT_WRITE_ZPD = 0x5B,
-    PM4_XE_SWAP = 0x64,
+    PM4_XE_SWAP = 0x64, PM4_IM_LOAD = 0x27, PM4_IM_LOAD_IMMEDIATE = 0x2B, PM4_DRAW_INDX_2 = 0x36,
 };
 
 // Registradores
@@ -124,6 +127,68 @@ void DispatchInterrupt(uint32_t source, uint32_t cpu)
     g_memory.FindFunction(callback)(ctx, g_memory.base);
 }
 
+
+// ---- Estatísticas (RAYMAN_GPU_STATS) e dump de shaders para private/shaders ----
+// Os shaders são código do jogo: ficam só na pasta local do usuário (fora do git).
+struct GpuStats
+{
+    uint64_t draws = 0, drawsThisFrame = 0, maxDrawsPerFrame = 0, shaderLoads = 0;
+    std::set<uint64_t> vertexShaders, pixelShaders;
+    std::set<uint32_t> colorInfos, depthInfos;
+};
+GpuStats g_stats;
+const bool g_gpuStats = getenv("RAYMAN_GPU_STATS") != nullptr;
+constexpr uint32_t REG_RB_COLOR_INFO = 0x2001;
+constexpr uint32_t REG_RB_DEPTH_INFO = 0x2002;
+
+void RecordShader(uint32_t type, const uint32_t* words, uint32_t dwords, bool swapped)
+{
+    g_stats.shaderLoads++;
+    std::vector<uint32_t> code(dwords);
+    for (uint32_t i = 0; i < dwords; i++)
+        code[i] = swapped ? __builtin_bswap32(words[i]) : words[i];
+    uint64_t hash = 0xCBF29CE484222325ull; // FNV-1a
+    for (uint32_t w : code)
+        for (int b = 0; b < 4; b++)
+            hash = (hash ^ ((w >> (b * 8)) & 0xFF)) * 0x100000001B3ull;
+    auto& set = type == 0 ? g_stats.vertexShaders : g_stats.pixelShaders;
+    if (!set.insert(hash).second || !g_gpuStats)
+        return;
+    std::filesystem::create_directories("private/shaders");
+    char name[96];
+    snprintf(name, sizeof(name), "private/shaders/%s_%016llx.bin", type == 0 ? "vs" : "ps", (unsigned long long)hash);
+    if (FILE* f = fopen(name, "wb"))
+    {
+        // Big-endian, como na memória do Xbox.
+        for (uint32_t w : code)
+        {
+            uint32_t be = __builtin_bswap32(w);
+            fwrite(&be, 4, 1, f);
+        }
+        fclose(f);
+    }
+}
+
+void RecordDraw()
+{
+    g_stats.draws++;
+    g_stats.drawsThisFrame++;
+    g_stats.colorInfos.insert(g_gpu.registers[REG_RB_COLOR_INFO]);
+    g_stats.depthInfos.insert(g_gpu.registers[REG_RB_DEPTH_INFO]);
+}
+
+void RecordFrame(uint64_t frame)
+{
+    g_stats.maxDrawsPerFrame = std::max(g_stats.maxDrawsPerFrame, g_stats.drawsThisFrame);
+    g_stats.drawsThisFrame = 0;
+    if (!g_gpuStats || frame % 120 != 0)
+        return;
+    fprintf(stderr, "[gpu-stats] frame %llu: %llu desenhos (max %llu/frame), %llu cargas de shader, %zu VS e %zu PS distintos, %zu formatos de cor, %zu de profundidade\n",
+            (unsigned long long)frame, (unsigned long long)g_stats.draws, (unsigned long long)g_stats.maxDrawsPerFrame,
+            (unsigned long long)g_stats.shaderLoads, g_stats.vertexShaders.size(), g_stats.pixelShaders.size(),
+            g_stats.colorInfos.size(), g_stats.depthInfos.size());
+}
+
 bool MatchValue(uint32_t value, uint32_t ref, uint32_t waitInfo)
 {
     return ((((value < ref) << 1) | ((value <= ref) << 2) | ((value == ref) << 3) | ((value != ref) << 4) |
@@ -199,6 +264,7 @@ void ExecutePacket(Reader& reader)
         uint32_t width = reader.Read(), height = reader.Read();
         reader.Skip(count - 4);
         g_gpu.counter++;
+        RecordFrame(g_gpu.frames + 1);
         if (++g_gpu.frames <= 3 || (g_gpu.frames % 300) == 0)
             fprintf(stderr, "[gpu] frame %llu: front buffer 0x%08X %ux%u\n",
                     (unsigned long long)g_gpu.frames, frontBuffer, width, height);
@@ -313,6 +379,29 @@ void ExecutePacket(Reader& reader)
             destination[i] = __builtin_bswap16(extents[i]);
         return;
     }
+    case PM4_IM_LOAD:
+    {
+        uint32_t addressType = reader.Read(), startSize = reader.Read();
+        reader.Skip(count - 2);
+        RecordShader(addressType & 3, static_cast<const uint32_t*>(g_memory.Translate(PhysicalToGuest(addressType & ~3u))), startSize & 0xFFFF, true);
+        return;
+    }
+    case PM4_IM_LOAD_IMMEDIATE:
+    {
+        uint32_t type = reader.Read(), startSize = reader.Read();
+        uint32_t dwords = std::min(startSize & 0xFFFF, count - 2);
+        std::vector<uint32_t> code(dwords);
+        for (uint32_t i = 0; i < dwords; i++)
+            code[i] = reader.Read();
+        reader.Skip(count - 2 - dwords);
+        RecordShader(type & 3, code.data(), dwords, false);
+        return;
+    }
+    case PM4_DRAW_INDX:
+    case PM4_DRAW_INDX_2:
+        RecordDraw();
+        reader.Skip(count);
+        return;
     case PM4_EVENT_WRITE_ZPD:
         // Consultas de oclusão: sem relatório por enquanto.
         WriteRegister(REG_VGT_EVENT_INITIATOR, reader.Read() & 0x3F);

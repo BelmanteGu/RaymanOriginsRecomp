@@ -218,3 +218,18 @@ GUEST_FUNCTION_HOOK(__imp__MmQueryAddressProtect, MmQueryAddressProtect);
 GUEST_FUNCTION_HOOK(__imp__MmGetPhysicalAddress, MmGetPhysicalAddress);
 GUEST_FUNCTION_HOOK(__imp__XamAlloc, XamAlloc);
 GUEST_FUNCTION_HOOK(__imp__XamFree, XamFree);
+
+// Para o runtime (contextos XMA etc.): memória física zerada e alinhada.
+uint32_t AllocatePhysicalMemory(uint32_t size, uint32_t alignment)
+{
+    return g_physical.Alloc(size, std::max<uint32_t>(alignment, 0x1000), true, false, X_PAGE_READWRITE);
+}
+
+// Mapeamento de I/O (usado pelo áudio): na memória plana, o endereço físico já é acessível.
+static uint32_t MmMapIoSpace(uint32_t unknown, uint32_t address, uint32_t size, uint32_t flags)
+{
+    (void)unknown; (void)size; (void)flags;
+    return address;
+}
+
+GUEST_FUNCTION_HOOK(__imp__MmMapIoSpace, MmMapIoSpace);
