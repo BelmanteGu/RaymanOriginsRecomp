@@ -51,6 +51,7 @@ void RaymanAudioDump(PPCRegister& r4) {
 #endif
 
 REX_EXTERN(__imp__sub_826D41B8);
+void RaymanNativeCaptureFrame();  // native_capture.cpp
 
 REX_HOOK_RAW(sub_826D41B8) {
   using clock = std::chrono::steady_clock;
@@ -58,6 +59,7 @@ REX_HOOK_RAW(sub_826D41B8) {
   static int frames = 0;
   static double worst_ms = 0;
   __imp__sub_826D41B8(ctx, base);
+  RaymanNativeCaptureFrame();
   auto now = clock::now();
   double ms = std::chrono::duration<double, std::milli>(now - last).count();
   last = now;

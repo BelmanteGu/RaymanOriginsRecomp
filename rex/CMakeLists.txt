@@ -15,6 +15,7 @@ set(RAYMAN_SOURCES
     src/main.cpp
     src/hooks.cpp
     src/android_touch.cpp
+    src/native_capture.cpp
 )
 
 if(ANDROID)
