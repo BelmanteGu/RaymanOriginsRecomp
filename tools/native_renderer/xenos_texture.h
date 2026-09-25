@@ -21,12 +21,14 @@ struct TextureFetch {
   uint32_t format, endian, base, width, height, pitch;
   uint32_t clampX, clampY;  // 0 wrap, 1 mirror, 2+ clamp variants
   bool tiled;
+  bool packedMips;  // small levels share one 32x32 tile (dword 5 bit 11)
 };
 
 // Texture fetch constant: 6 big-endian dwords (Xenos registers 0x4800 + 6*slot).
 inline TextureFetch DecodeFetch(const uint8_t* p) {
-  uint32_t d0 = BE32(p), d1 = BE32(p + 4), d2 = BE32(p + 8);
+  uint32_t d0 = BE32(p), d1 = BE32(p + 4), d2 = BE32(p + 8), d5 = BE32(p + 20);
   TextureFetch t;
+  t.packedMips = (d5 >> 11) & 1;
   t.tiled = d0 >> 31;
   t.clampX = (d0 >> 10) & 7;
   t.clampY = (d0 >> 13) & 7;
@@ -46,6 +48,22 @@ inline int32_t GetTiledOffset2D(int32_t x, int32_t y, uint32_t pitch, uint32_t b
   int32_t offset = macro + ((micro & ~0xF) << 1) + (micro & 0xF) + ((y & 1) << 4);
   return ((offset & ~0x1FF) << 3) + ((y & 16) << 7) + ((offset & 0x1C0) << 2) +
          (((((y & 8) >> 2) + (x >> 3)) & 3) << 6) + (offset & 0x3F);
+}
+
+inline uint32_t Log2Ceil(uint32_t v) {
+  uint32_t l = 0;
+  while ((1u << l) < v) ++l;
+  return l;
+}
+
+// Where the base level of a small texture sits inside its packed mip tile, in
+// texels (ReXGlue / Xenia texture_util::GetPackedMipOffset for mip 0, 2D).
+inline void PackedBaseOffset(uint32_t width, uint32_t height, uint32_t& x, uint32_t& y) {
+  x = y = 0;
+  uint32_t lw = Log2Ceil(width), lh = Log2Ceil(height);
+  if (std::min(lw, lh) > 4) return;  // shortest side > 16: not packed
+  if (lw > lh) y = 16;               // wider than tall: laid out vertically
+  else x = 16;                       // square or taller: laid out horizontally
 }
 
 // Xenos endian modes: 0 none, 1 8in16, 2 8in32, 3 16in32.
@@ -106,10 +124,15 @@ inline bool DecodeTexture(const MemoryReader& memory, const TextureFetch& t, std
   uint32_t log2 = blockBytes == 16 ? 4 : blockBytes == 8 ? 3 : 2;
   uint32_t bw = block ? (t.width + 3) / 4 : t.width, bh = block ? (t.height + 3) / 4 : t.height;
   uint32_t pitch = std::max(t.pitch / (block ? 4 : 1), (bw + 31) & ~31u);
+  uint32_t ox = 0, oy = 0;  // base level offset inside a packed mip tile, in blocks
+  if (t.packedMips && t.tiled) {
+    PackedBaseOffset(t.width, t.height, ox, oy);
+    if (block) { ox /= 4; oy /= 4; }
+  }
   uint32_t span = 0;
   for (uint32_t by = 0; by < bh; ++by)
     for (uint32_t bx = 0; bx < bw; ++bx) {
-      uint32_t off = t.tiled ? uint32_t(GetTiledOffset2D(bx, by, pitch, log2)) : (by * pitch + bx) * blockBytes;
+      uint32_t off = t.tiled ? uint32_t(GetTiledOffset2D(bx + ox, by + oy, pitch, log2)) : (by * pitch + bx) * blockBytes;
       span = std::max(span, off + blockBytes);
     }
   const uint8_t* src = memory(t.base, span);
@@ -117,7 +140,7 @@ inline bool DecodeTexture(const MemoryReader& memory, const TextureFetch& t, std
   rgba.assign(size_t(t.width) * t.height * 4, 0);
   for (uint32_t by = 0; by < bh; ++by) {
     for (uint32_t bx = 0; bx < bw; ++bx) {
-      uint32_t off = t.tiled ? uint32_t(GetTiledOffset2D(bx, by, pitch, log2)) : (by * pitch + bx) * blockBytes;
+      uint32_t off = t.tiled ? uint32_t(GetTiledOffset2D(bx + ox, by + oy, pitch, log2)) : (by * pitch + bx) * blockBytes;
       uint8_t blk[16];
       std::memcpy(blk, src + off, blockBytes);
       Swap(blk, blockBytes, t.endian);
