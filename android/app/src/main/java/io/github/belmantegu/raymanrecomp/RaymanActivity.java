@@ -97,6 +97,24 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
         touchControls.applyPreferences();
     }
 
+    // Touches in flight when the window loses focus (notification shade, system
+    // gestures, dialogs, app switch) never deliver their "up": let go of them.
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus && touchControls != null) {
+            touchControls.releaseAll();
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        if (touchControls != null) {
+            touchControls.releaseAll();
+        }
+        super.onPause();
+    }
+
     @Override
     public void onOpenSettings() {
         final SharedPreferences prefs = getSharedPreferences(TouchControls.PREFS, MODE_PRIVATE);
