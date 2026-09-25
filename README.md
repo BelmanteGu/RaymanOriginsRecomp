@@ -6,21 +6,25 @@ An unofficial effort to statically recompile the Xbox 360 version of **Rayman Or
 > **This repository contains no game code or assets.** You need your own legally obtained copy of Rayman Origins for Xbox 360. Everything derived from the game (the executable, the recompiled C++ and the game data) is generated or read locally from your own dump and must never be committed, uploaded or shared here.
 
 <p align="center">
-  <img src="docs/media/android-s23-touch-controls.jpg" alt="Rayman Origins in-game on a Galaxy S23, with the on-screen controller" width="820">
+  <img src="docs/media/android-s23-native-gameplay.jpg" alt="Rayman Origins in-game on a Galaxy S23 in 19.5:9 widescreen, with the on-screen controller" width="820">
   <br>
-  <em>In-game on a Galaxy S23 (Android 16), with the on-screen controller</em>
+  <em>Galaxy S23 (Android 16): native Vulkan renderer, true 19.5:9 widescreen, 60 fps, on-screen controller</em>
 </p>
 
 <table>
   <tr>
-    <td align="center"><img src="docs/media/android-s23-title.jpg" alt="Title screen on a Galaxy S23" width="400"><br><em>Android: Galaxy S23, Adreno 740</em></td>
-    <td align="center"><img src="docs/media/macos-title.jpg" alt="Title screen on macOS" width="400"><br><em>macOS: Apple M1</em></td>
+    <td align="center"><img src="docs/media/android-s23-native-combat.jpg" alt="Combat in widescreen on a Galaxy S23" width="400"><br><em>Gameplay</em></td>
+    <td align="center"><img src="docs/media/android-s23-native-map.jpg" alt="World map on a Galaxy S23" width="400"><br><em>World map</em></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/android-s23-native-cutscene.jpg" alt="Betilla cutscene on a Galaxy S23" width="400"><br><em>Cutscene</em></td>
+    <td align="center"><img src="docs/media/android-s23-settings.jpg" alt="In-game settings on a Galaxy S23" width="400"><br><em>Settings: controls opacity/size, native renderer</em></td>
   </tr>
 </table>
 
 ## Status
 
-**The game runs on macOS (Apple Silicon) and on Android (Galaxy S23)** with graphics, audio, movies and controls. On Android there is an on-screen controller; physical controllers and keyboards work too. The game's code is recompiled to native ARM64. Graphics still go through Xbox 360 GPU emulation (ReXGlue's Xenos backend on Vulkan), and that is the next thing to replace: see the [roadmap](#roadmap).
+**The game runs on macOS (Apple Silicon) and on Android (Galaxy S23)** with graphics, audio, movies and controls. On Android there is an on-screen controller; physical controllers and keyboards work too. The game's code is recompiled to native ARM64. Graphics no longer go through Xbox 360 GPU emulation: a native renderer draws the game's frames straight to Vulkan with its own shaders, at 60 fps and in true widescreen (19.5:9 on the S23). See [docs/NATIVE_RENDERER.md](docs/NATIVE_RENDERER.md).
 
 | Phase | Goal | Status |
 |---|---|---|
@@ -29,14 +33,15 @@ An unofficial effort to statically recompile the Xbox 360 version of **Rayman Or
 | 3 | Boot test: the game allocates memory, starts threads and opens its `.ipk` archives | ✅ Done |
 | 4 | Graphics, audio, input | ✅ Via [ReXGlue](https://github.com/rexglue/rexglue-sdk) (Vulkan/MoltenVK), GPU emulated |
 | 5 | Android (NDK, Vulkan, touch/gamepad) | ✅ Runs on a Galaxy S23: [docs/ANDROID.md](docs/ANDROID.md) |
-| 6 | Native renderer (no GPU emulation) | ⏳ Next |
+| 6 | Native renderer (no GPU emulation) | ✅ Done: 60 fps on a Galaxy S23, true widescreen, movies. [docs/NATIVE_RENDERER.md](docs/NATIVE_RENDERER.md) |
 
 ## Roadmap
 
-1. **Native renderer.** Translate the game's Direct3D 9 calls straight to Vulkan and Metal (plume), with shaders converted ahead of time by XenosRecomp. See [docs/PROGRESS.md](docs/PROGRESS.md) section 7.
-2. **True widescreen.** Patch the game's camera so a 19.5:9 phone shows more of the level instead of stretching.
-3. **Performance on phones.** Measure and tune on the Galaxy S23.
-4. **Polish.** Optional Turnip driver for Adreno, an in-app game folder picker, and suspend/resume.
+1. ~~**Native renderer.**~~ ✅ Done: the game's draws go straight to Vulkan, with shaders converted ahead of time by XenosRecomp.
+2. ~~**True widescreen.**~~ ✅ Done: a 19.5:9 phone shows more of the level instead of stretching.
+3. **Native renderer gaps.** Render-to-texture passes and vertex formats not seen yet.
+4. **Performance on phones.** Measure and tune on the Galaxy S23.
+5. **Polish.** Optional Turnip driver for Adreno, an in-app game folder picker, and suspend/resume.
 
 Technical write-up of every step, including the bugs found along the way: [docs/PROGRESS.md](docs/PROGRESS.md).
 
