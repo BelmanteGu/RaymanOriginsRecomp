@@ -193,6 +193,33 @@ The device layout is XDK-version specific, so it was checked against Rayman Orig
 
 The render-state table matches exactly. The sampler table is longer in this XDK, so the padding after it has to be re-measured before the rest of the structure (sampler states, shader constants, viewport) can be trusted. Next: pin down the remaining `GuestDevice` offsets and map the 42 hooked functions to their Rayman addresses. The Vd* callers and the resource vtables at `0x82085B08`–`0x82086C04` give the anchors.
 
+### Baseline performance (Xenos emulation)
+
+`rex/src/hooks.cpp` wraps the D3D Present (`sub_826D41B8`) and logs the frame rate every 2 seconds. On an Apple M1, window 960×540, title screen and intro:
+
+- **30–55 fps** (the game targets 60)
+- **Frame spikes of 100–620 ms**, which line up with the Xenos backend creating graphics pipelines at runtime
+
+Precompiled shaders and pipelines in a native renderer remove exactly those spikes.
+
+### Draw calls the game actually uses
+
+The D3D functions that emit PM4 draw packets, and who calls them:
+
+| Function | Packet | Called from | Role (inferred) |
+|---|---|---|---|
+| `sub_826D7588` | `DRAW_INDX` | adapter methods `vt[95–98]`, `vt[108]` | main indexed draw |
+| `sub_826D7170` | `DRAW_INDX` | adapter `vt[98]`, `vt[107]` | draw (variant) |
+| `sub_826D6C68` | `DRAW_INDX` | adapter `vt[37]`, via `sub_826D7128` | draw with inline data |
+| `sub_826E9B28` | `IM_LOAD` | every draw above | uploads the bound shaders before a draw |
+| `sub_826E9938` | `LOAD_ALU_CONSTANT` | `sub_826E9B28` | uploads shader constants |
+
+The six `DRAW_INDX_2` emitters (`sub_826D4840`, `sub_826D4998`, …) are only reached from inside D3D: they are clear and resolve paths.
+
+### Shaders convert and compile
+
+XenosRecomp (built with LLVM 23 on macOS) converts **all 31 game shaders to HLSL with no failures**. Its directory mode compiles them with DXC into a **53 KB SPIR-V cache** (31 entries). DXIL isn't produced on macOS, and it isn't needed: Vulkan covers Android and, through MoltenVK, the Mac.
+
 ### Why the Mac is the right test bed
 
 The recompiled code already runs as **ARM64** on Apple Silicon (SIMDe for VMX), which is the Android CPU architecture. Boot, threads, file I/O, audio and the title screen are all validated on ARM64, so most of the Android risk is exercised daily. What the Mac does not exercise is texture compression: Apple Silicon Macs decode BC (DXT), most phone GPUs don't.
