@@ -92,7 +92,7 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
     static final String KEY_NATIVE = "native_renderer";
 
     private boolean nativeRenderer(SharedPreferences prefs) {
-        return prefs.getBoolean(KEY_NATIVE, true);
+        return prefs.getBoolean(KEY_NATIVE, false);  // opt-in until the Adreno bring-up is done
     }
 
     @Override

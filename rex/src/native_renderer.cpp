@@ -52,6 +52,7 @@ void RaymanNativeRendererInit() {
   if (!Enabled() || g_renderer) {
     return;
   }
+  NATIVE_LOG("native renderer: starting (%s)", std::getenv("RAYMAN_NATIVE_RENDER"));
   bool mainWindow = std::string(std::getenv("RAYMAN_NATIVE_RENDER")) == "main";
   std::vector<const char*> exts;
   PFN_vkGetInstanceProcAddr loader = nullptr;
@@ -112,7 +113,9 @@ void RaymanNativeRendererInit() {
   }
   int w = 0, h = 0;
   SDL_GetWindowSizeInPixels(g_window, &w, &h);
+  NATIVE_LOG("native renderer: window %p %dx%d", static_cast<void*>(g_window), w, h);
   auto* renderer = new native::Renderer();
+  renderer->log = [](const char* stage) { NATIVE_LOG("native renderer: %s", stage); };
   bool ok = renderer->Init(loader, exts, makeSurface, uint32_t(w), uint32_t(h));
   if (!ok) {
     NATIVE_LOG("renderer init failed: %s", renderer->error().c_str());

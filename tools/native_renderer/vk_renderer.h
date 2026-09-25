@@ -60,20 +60,30 @@ class Renderer {
   // loader: vkGetInstanceProcAddr to use (null: volk finds the system loader).
   // surface: creates the window surface (null: offscreen, EndFrame reads back).
   // extraInstanceExtensions: what the window system needs (e.g. from SDL).
+  // Optional progress log (initialization stages), e.g. for device bring-up.
+  std::function<void(const char*)> log;
+
   bool Init(PFN_vkGetInstanceProcAddr loader, const std::vector<const char*>& extraInstanceExtensions,
             SurfaceFactory surface, uint32_t width, uint32_t height) {
+    auto stage = [this](const char* s) { if (log) log(s); };
     width_ = width;
     height_ = height;
+    stage("loader");
     if (loader) volkInitializeCustom(loader);
     else if (volkInitialize() != VK_SUCCESS) return Fail("no Vulkan loader");
+    stage("instance");
     if (!CreateInstance(extraInstanceExtensions)) return false;
     if (surface) {
+      stage("surface");
       surface_ = surface(instance_);
       if (!surface_) return Fail("surface creation failed");
     }
+    stage("device");
     if (!CreateDevice()) return false;
+    stage(surface_ ? "swapchain" : "offscreen target");
     if (surface_ && !CreateSwapchain()) return false;
     if (!surface_ && !CreateOffscreen()) return false;
+    stage("descriptors");
     if (!CreateDescriptors()) return false;
     constants_ = CreateBuffer(64u << 20, 0);
     vertices_ = CreateBuffer(64u << 20, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
@@ -367,12 +377,14 @@ class Renderer {
   }
 
   bool CreateDevice() {
+    auto stage = [this](const char* st) { if (log) log(st); };
     uint32_t count = 0;
     vkEnumeratePhysicalDevices(instance_, &count, nullptr);
     if (!count) return Fail("no Vulkan device");
     std::vector<VkPhysicalDevice> devices(count);
     vkEnumeratePhysicalDevices(instance_, &count, devices.data());
     phys_ = devices[0];
+    stage("device: physical device found");
     vkGetPhysicalDeviceProperties(phys_, &props_);
     vkGetPhysicalDeviceMemoryProperties(phys_, &memProps_);
     uint32_t families = 0;
@@ -384,9 +396,17 @@ class Renderer {
       if (surface_) vkGetPhysicalDeviceSurfaceSupportKHR(phys_, i, surface_, &present);
       if ((fam[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present) { queueFamily_ = i; break; }
     }
+    stage("device: queue family chosen");
     VkPhysicalDeviceVulkan12Features have12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     VkPhysicalDeviceFeatures2 have{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &have12};
+    if (log) {
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), "device: features2 fn %p, api %u.%u", reinterpret_cast<void*>(vkGetPhysicalDeviceFeatures2),
+                    VK_API_VERSION_MAJOR(props_.apiVersion), VK_API_VERSION_MINOR(props_.apiVersion));
+      log(buf);
+    }
     vkGetPhysicalDeviceFeatures2(phys_, &have);
+    stage("device: features queried");
     if (!have.features.shaderInt64 || !have12.bufferDeviceAddress || !have12.runtimeDescriptorArray ||
         !have12.descriptorBindingPartiallyBound)
       return Fail("GPU lacks int64 / buffer device address / descriptor indexing");
@@ -403,6 +423,7 @@ class Renderer {
     queue.queueFamilyIndex = queueFamily_;
     queue.queueCount = 1;
     queue.pQueuePriorities = &priority;
+    stage("device: features ok");
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(phys_, nullptr, &extCount, nullptr);
     std::vector<VkExtensionProperties> exts(extCount);
@@ -416,7 +437,9 @@ class Renderer {
     info.pQueueCreateInfos = &queue;
     info.enabledExtensionCount = uint32_t(enable.size());
     info.ppEnabledExtensionNames = enable.data();
+    stage("device: vkCreateDevice");
     if (vkCreateDevice(phys_, &info, nullptr, &device_) != VK_SUCCESS) return Fail("vkCreateDevice failed");
+    stage("device: created");
     volkLoadDevice(device_);
     vkGetDeviceQueue(device_, queueFamily_, 0, &queue_);
     VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
