@@ -7,8 +7,15 @@
 // SPIR-V is read from RAYMAN_NATIVE_SPIRV (default: private/native/shaders_by_hash,
 // relative to the repository root), as <HASH>_vs.spv / <HASH>_ps.spv.
 #include <SDL3/SDL.h>
+#if defined(__ANDROID__)
+#include <android/native_window.h>
+#include <dlfcn.h>
+#endif
 #include <SDL3/SDL_metal.h>
 #include <SDL3/SDL_vulkan.h>
+
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <cstdio>
@@ -27,6 +34,7 @@
 #endif
 
 extern uint8_t* g_rayman_physbase;  // native_capture.cpp
+extern uint8_t* g_rayman_membase;   // hooks.cpp
 
 namespace {
 
@@ -85,6 +93,12 @@ void RaymanNativeRendererInit() {
       VkAndroidSurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
       info.window = static_cast<ANativeWindow*>(SDL_GetPointerProperty(
           SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+      // The game runs at 60 fps: ask for a 60 Hz display mode rather than 120.
+      // ANativeWindow_setFrameRate is API 30+; look it up so API 29 still loads.
+      using SetFrameRate = int32_t (*)(ANativeWindow*, float, int8_t);
+      if (auto set = reinterpret_cast<SetFrameRate>(dlsym(RTLD_DEFAULT, "ANativeWindow_setFrameRate"))) {
+        set(info.window, 60.0f, 1 /* ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE */);
+      }
       VkSurfaceKHR surface = VK_NULL_HANDLE;
       vkCreateAndroidSurfaceKHR(instance, &info, nullptr, &surface);
       return surface;
@@ -137,6 +151,30 @@ void RaymanNativeRendererInit() {
     if (!g_rayman_physbase || uint64_t(address) + size > 0x20000000u) return nullptr;
     return g_rayman_physbase + address;
   });
+  if (const char* ws = std::getenv("RAYMAN_WIDESCREEN")) {
+    float aspect = std::string(ws) == "auto" ? float(w) / float(h) : float(std::atof(ws));
+    if (aspect > 16.0f / 9.0f + 0.01f && g_rayman_membase) {
+      // UbiArt fits its camera and screen rects to 16:9 with these two
+      // constants (sub_824C8798): 16/9 at 0x8201EF58 and 9/16 at 0x8201EF5C.
+      // They live in the image's read-only data, so the page is made writable
+      // for the store and read-only again afterwards.
+      auto store = [](uint32_t address, float v) {
+        uint32_t bits;
+        std::memcpy(&bits, &v, 4);
+        bits = __builtin_bswap32(bits);
+        uint8_t* host = g_rayman_membase + address;
+        uintptr_t page = uintptr_t(sysconf(_SC_PAGESIZE));
+        void* start = reinterpret_cast<void*>(uintptr_t(host) & ~(page - 1));
+        mprotect(start, page, PROT_READ | PROT_WRITE);
+        std::memcpy(host, &bits, 4);
+        mprotect(start, page, PROT_READ);
+      };
+      store(0x8201EF58, aspect);
+      store(0x8201EF5C, 1.0f / aspect);
+      renderer->SetAspect(aspect);
+      NATIVE_LOG("widescreen: aspect %.4f", aspect);
+    }
+  }
   g_renderer = renderer;
   NATIVE_LOG("native renderer ready (%dx%d), SPIR-V from %s", w, h, dir.c_str());
 }
@@ -166,7 +204,8 @@ void RaymanNativeRendererPresent() {
   // With RAYMAN_CAPTURE=1, save the native frame every 10 s next to the
   // emulated captures (captures/native_NNN.ppm).
   static auto start = std::chrono::steady_clock::now();
-  static int nextShot = 10;
+  static const int interval = std::getenv("RAYMAN_CAPTURE_INTERVAL") ? std::atoi(std::getenv("RAYMAN_CAPTURE_INTERVAL")) : 10;
+  static int nextShot = interval;
   bool shot = std::getenv("RAYMAN_CAPTURE") &&
               std::chrono::steady_clock::now() - start >= std::chrono::seconds(nextShot);
   std::vector<uint8_t> pixels;
@@ -181,7 +220,7 @@ void RaymanNativeRendererPresent() {
       std::fclose(f);
       NATIVE_LOG("saved %s", name);
     }
-    nextShot += 10;
+    nextShot += interval;
   }
   static int frames = 0;
   if (++frames % 300 == 0) {

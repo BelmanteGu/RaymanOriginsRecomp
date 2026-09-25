@@ -137,7 +137,8 @@ class Renderer {
   // since the game reuses the memory after the call.
   void Draw(const DrawCall& d) {
     bool indexed = d.entry == 0;
-    if ((d.entry != 0 && d.entry != 1) || d.primitive != 4 || (indexed && !d.ibAddress)) {
+    bool quads = d.primitive == 13;  // Xenos quad list: 4 vertices per quad
+    if ((d.entry != 0 && d.entry != 1) || (d.primitive != 4 && !quads) || (indexed && !d.ibAddress)) {
       Skip("draw entry " + std::to_string(d.entry) + " primitive " + std::to_string(d.primitive));
       return;
     }
@@ -166,6 +167,18 @@ class Renderer {
       r.vertexOffset = CopyVertices(vb, vsize, *layout);
       r.firstVertex = d.baseVertex;
       r.vertexCount = d.startIndex;
+      if (quads) {
+        uint32_t count = r.vertexCount / 4;
+        r.indexOffset = indices_.Alloc(size_t(count) * 6 * 4, 4);
+        uint32_t* out = reinterpret_cast<uint32_t*>(indices_.map + r.indexOffset);
+        for (uint32_t q = 0; q < count; ++q) {
+          uint32_t v = r.firstVertex + q * 4;
+          uint32_t tri[6] = {v, v + 1, v + 2, v, v + 2, v + 3};
+          std::memcpy(out + q * 6, tri, sizeof(tri));
+        }
+        r.indexCount = count * 6;
+        r.indexType = VK_INDEX_TYPE_UINT32;
+      }
       FillConstants(d, r);
       uint32_t blend = xenos::BE32(d.state + (0x2934 - kStateBegin) + 4);
       r.pipeline = Pipeline(d.vs, d.ps, vsm, psm, *layout, blend);
@@ -199,6 +212,21 @@ class Renderer {
     }
     r.indexCount = d.indexCount;
     r.indexType = isize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+    if (quads) {
+      std::vector<uint32_t> in(d.indexCount);
+      for (uint32_t i = 0; i < d.indexCount; ++i)
+        in[i] = isize == 2 ? uint32_t(idx[i * 2] << 8 | idx[i * 2 + 1]) : xenos::BE32(idx + i * 4);
+      uint32_t count = d.indexCount / 4;
+      r.indexOffset = indices_.Alloc(size_t(count) * 6 * 4, 4);
+      uint32_t* out = reinterpret_cast<uint32_t*>(indices_.map + r.indexOffset);
+      for (uint32_t q = 0; q < count; ++q) {
+        const uint32_t* v = &in[q * 4];
+        uint32_t tri[6] = {v[0], v[1], v[2], v[0], v[2], v[3]};
+        std::memcpy(out + q * 6, tri, sizeof(tri));
+      }
+      r.indexCount = count * 6;
+      r.indexType = VK_INDEX_TYPE_UINT32;
+    }
     FillConstants(d, r);
     uint32_t blend = xenos::BE32(d.state + (0x2934 - kStateBegin) + 4);  // RB_BLENDCONTROL0
     r.pipeline = Pipeline(d.vs, d.ps, vsm, psm, *layout, blend);
@@ -263,8 +291,9 @@ class Renderer {
     rb.pClearValues = &clear;
     vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
     // The game renders 1280x720: letterbox it into the target.
-    float scale = std::min(extent_.width / 1280.0f, extent_.height / 720.0f);
-    float vw = 1280.0f * scale, vh = 720.0f * scale;
+    // Fit the game's frame (16:9, or wider with the widescreen patch) into the target.
+    float scale = std::min(extent_.width / (720.0f * aspect_), extent_.height / 720.0f);
+    float vw = 720.0f * aspect_ * scale, vh = 720.0f * scale;
     VkViewport viewport{(extent_.width - vw) / 2, (extent_.height - vh) / 2, vw, vh, 0, 1};
     VkRect2D scissor{{0, 0}, extent_};
     vkCmdSetViewport(cmd_, 0, 1, &viewport);
@@ -330,6 +359,9 @@ class Renderer {
     }
     return true;
   }
+
+  // Aspect ratio of the frames the game draws (width / height).
+  void SetAspect(float aspect) { aspect_ = aspect; }
 
   uint32_t width() const { return extent_.width; }
   uint32_t height() const { return extent_.height; }
@@ -734,16 +766,30 @@ class Renderer {
     return uint32_t(at);
   }
 
-  // Texture cache keyed by the fetch constant (address, format, size); decoded once.
-  int Texture(const xenos::TextureFetch& t, const uint8_t* fetch) {
-    uint64_t key = uint64_t(xenos::BE32(fetch + 4)) << 32 | xenos::BE32(fetch + 8);
-    auto it = textures_.find(key);
-    if (it != textures_.end()) return it->second;
-    if (!xenos::Supported(t.format) || textureCount_ >= kMaxTextures) return textures_[key] = -1;
-    std::vector<uint8_t> rgba;
-    if (!xenos::DecodeTexture(memory_, t, rgba) || staging_.used + rgba.size() > staging_.size) return -1;
-    Image img = CreateImage(t.width, t.height, VK_FORMAT_R8G8B8A8_UNORM,
-                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+  // Texture cache keyed by the fetch constant (address, format, size). The
+  // game reuses addresses for new content (movie frames are rewritten in place
+  // every frame, streaming reuses memory), so each entry keeps a cheap content
+  // signature and is re-decoded into the same image when it changes.
+  struct TextureEntry {
+    int index = -1;
+    Image image;
+    uint32_t span = 0;
+    uint64_t signature = 0;
+  };
+
+  uint64_t Signature(uint32_t base, uint32_t span) {
+    uint64_t h = 1469598103934665603ull;
+    for (uint32_t i = 0; i < 32; ++i) {
+      uint32_t off = uint32_t(uint64_t(span > 8 ? span - 8 : 0) * i / 31);
+      const uint8_t* p = memory_(base + off, 8);
+      uint64_t v = 0;
+      if (p) std::memcpy(&v, p, 8);
+      h = (h ^ v) * 1099511628211ull;
+    }
+    return h;
+  }
+
+  void Upload(const Image& img, const xenos::TextureFetch& t, const std::vector<uint8_t>& rgba, bool fresh) {
     if (!uploadsBegun_) {
       VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
       vkBeginCommandBuffer(uploads_, &begin);
@@ -751,24 +797,63 @@ class Renderer {
     }
     size_t at = staging_.Alloc(rgba.size(), 16);
     std::memcpy(staging_.map + at, rgba.data(), rgba.size());
-    Barrier(uploads_, img.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    Barrier(uploads_, img.image, fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkBufferImageCopy copy{};
     copy.bufferOffset = at;
     copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     copy.imageExtent = {t.width, t.height, 1};
     vkCmdCopyBufferToImage(uploads_, staging_.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
     Barrier(uploads_, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    int index = int(textureCount_++);
-    VkDescriptorImageInfo ii{VK_NULL_HANDLE, img.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+  }
+
+  int Texture(const xenos::TextureFetch& t, const uint8_t* fetch) {
+    uint64_t key = uint64_t(xenos::BE32(fetch + 4)) << 32 | xenos::BE32(fetch + 8);
+    auto it = textures_.find(key);
+    if (it != textures_.end()) {
+      TextureEntry& e = it->second;
+      if (e.index < 0) return -1;
+      uint64_t signature = Signature(t.base, e.span);
+      if (signature != e.signature) {
+        std::vector<uint8_t> rgba;
+        if (xenos::DecodeTexture(memory_, t, rgba) && staging_.used + rgba.size() <= staging_.size) {
+          Upload(e.image, t, rgba, false);
+          e.signature = signature;
+        }
+      }
+      return e.index;
+    }
+    TextureEntry& e = textures_[key];
+    if (!xenos::Supported(t.format) || textureCount_ >= kMaxTextures) {
+      ++skipReasons_["texture format 0x" + std::to_string(t.format) + " (" + std::to_string(t.width) + "x" +
+                     std::to_string(t.height) + ") not supported"];
+      return -1;
+    }
+    std::vector<uint8_t> rgba;
+    if (!xenos::DecodeTexture(memory_, t, rgba) || staging_.used + rgba.size() > staging_.size) {
+      textures_.erase(key);
+      return -1;
+    }
+    e.image = CreateImage(t.width, t.height, VK_FORMAT_R8G8B8A8_UNORM,
+                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    Upload(e.image, t, rgba, true);
+    // Bytes the base level spans (an upper bound over its tiled layout).
+    bool block = t.format == 0x12 || t.format == 0x13 || t.format == 0x14;
+    uint32_t blockBytes = t.format == 0x12 ? 8 : block ? 16 : t.format == 0x06 ? 4 : 1;
+    uint32_t bw = block ? (t.width + 3) / 4 : t.width, bh = block ? (t.height + 3) / 4 : t.height;
+    e.span = ((std::max(t.pitch / (block ? 4 : 1), bw) + 31) & ~31u) * ((bh + 31) & ~31u) * blockBytes;
+    e.signature = Signature(t.base, e.span);
+    e.index = int(textureCount_++);
+    VkDescriptorImageInfo ii{VK_NULL_HANDLE, e.image.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
     w.dstSet = sets_[0];
-    w.dstArrayElement = uint32_t(index);
+    w.dstArrayElement = uint32_t(e.index);
     w.descriptorCount = 1;
     w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     w.pImageInfo = &ii;
     vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
     stats_.textures = textureCount_;
-    return textures_[key] = index;
+    return e.index;
   }
 
   VkShaderModule Module(uint64_t hash, bool vertex) {
@@ -887,6 +972,7 @@ class Renderer {
   }
 
   uint32_t width_ = 0, height_ = 0;
+  float aspect_ = 16.0f / 9.0f;
   VkExtent2D extent_{};
   bool ready_ = false;
   std::string error_;
@@ -920,7 +1006,7 @@ class Renderer {
   VkCommandBuffer cmd_ = VK_NULL_HANDLE, uploads_ = VK_NULL_HANDLE;
   bool uploadsBegun_ = false;
   std::vector<Recorded> frameDraws_;
-  std::unordered_map<uint64_t, int> textures_;
+  std::unordered_map<uint64_t, TextureEntry> textures_;
   uint32_t textureCount_ = 0;
   std::unordered_map<uint64_t, VkShaderModule> modules_;
   std::unordered_map<uint64_t, std::vector<uint32_t>> inputs_;
