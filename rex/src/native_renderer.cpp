@@ -195,17 +195,42 @@ void RaymanNativeRendererInit() {
   NATIVE_LOG("native renderer ready (%dx%d), SPIR-V from %s", w, h, dir.c_str());
 }
 
+namespace {
+void OpenFrame() {
+  if (!g_frameOpen) {
+    g_renderer->BeginFrame();
+    g_frameOpen = true;
+  }
+}
+}  // namespace
+
 // Render thread, from the draw hooks (native_capture.cpp).
 void RaymanNativeRendererDraw(const native::DrawCall& call) {
   if (!g_renderer) {
     return;
   }
   std::lock_guard lock(g_mutex);
-  if (!g_frameOpen) {
-    g_renderer->BeginFrame();
-    g_frameOpen = true;
-  }
+  OpenFrame();
   g_renderer->Draw(call);
+}
+
+// Render thread, from the Clear / Resolve hooks. state = device + native::kStateBegin.
+void RaymanNativeRendererClear(const uint8_t* state, uint32_t argb) {
+  if (!g_renderer) {
+    return;
+  }
+  std::lock_guard lock(g_mutex);
+  OpenFrame();
+  g_renderer->Clear(state, argb);
+}
+
+void RaymanNativeRendererResolve(const uint8_t* state, const int32_t* rect, const uint8_t* destFetch) {
+  if (!g_renderer) {
+    return;
+  }
+  std::lock_guard lock(g_mutex);
+  OpenFrame();
+  g_renderer->Resolve(state, rect, destFetch);
 }
 
 // Render thread, from the Present hook.

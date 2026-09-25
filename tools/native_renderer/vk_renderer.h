@@ -16,6 +16,7 @@
 #endif
 #include <volk.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -56,6 +57,8 @@ class Renderer {
     uint32_t indexCount;
     VkIndexType indexType;
     uint32_t firstVertex, vertexCount;  // non-indexed draws
+    uint64_t target;                    // render target (TargetOf)
+    float viewport[4];                  // x, y, width, height in the target's pixels
   };
   using ShaderSource = std::function<std::vector<uint32_t>(uint64_t hash, bool vertex)>;
   using SurfaceFactory = std::function<VkSurfaceKHR(VkInstance)>;
@@ -87,6 +90,7 @@ class Renderer {
     if (surface_ && !CreateSwapchain()) return false;
     if (!surface_ && !CreateOffscreen()) return false;
     stage("descriptors");
+    if (!CreateRenderPass()) return Fail("render pass failed");
     if (!CreateDescriptors()) return false;
     constants_ = CreateBuffer(64u << 20, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
     vertices_ = CreateBuffer(64u << 20, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
@@ -132,7 +136,39 @@ class Renderer {
     stats_.draws = stats_.skipped = 0;
     cmd_ = AllocCommandBuffer();
     uploads_ = AllocCommandBuffer();
-    frameDraws_.clear();
+    frameOps_.clear();
+  }
+
+  // Render-target traffic from the D3D layer; state = device + kStateBegin.
+  // Clear: fills the current render target with an ARGB color.
+  void Clear(const uint8_t* state, uint32_t argb) {
+    Op op{};
+    op.kind = Op::kClear;
+    op.target = TargetOf(state);
+    op.color = argb;
+    frameOps_.push_back(op);
+  }
+
+  // Resolve: copies a rectangle of the current render target (x1, y1, x2, y2
+  // in its pixels; null = the current viewport) into the texture described by
+  // destFetch (its fetch constant, big-endian). Later draws that fetch that
+  // address sample the copy instead of decoding guest memory, which the GPU
+  // would have written on the console.
+  void Resolve(const uint8_t* state, const int32_t* rect, const uint8_t* destFetch) {
+    xenos::TextureFetch t = xenos::DecodeFetch(destFetch);
+    if (t.width < 8 || t.height < 8) return;  // not a color texture (the front buffer)
+    Op op{};
+    op.kind = Op::kResolve;
+    op.target = TargetOf(state);
+    if (rect) {
+      for (int i = 0; i < 4; ++i) op.rect[i] = float(rect[i]);
+    } else {
+      float v[4];
+      GameViewport(state, v);
+      op.rect[0] = v[0], op.rect[1] = v[1], op.rect[2] = v[0] + v[2], op.rect[3] = v[1] + v[3];
+    }
+    op.resolved = ResolvedFor(t);
+    if (op.resolved) frameOps_.push_back(op);
   }
 
   // Captures one draw: copies its vertices, indices and constants right away,
@@ -211,8 +247,35 @@ class Renderer {
     uint32_t blend = xenos::BE32(d.state + (0x2934 - kStateBegin) + 4);  // RB_BLENDCONTROL0
     r.pipeline = Pipeline(d.vs, d.ps, vsm, psm, *layout, blend);
     if (!r.pipeline) { ++stats_.skipped; return; }
-    frameDraws_.push_back(r);
+    r.target = TargetOf(d.state);
+    GameViewport(d.state, r.viewport);
+    Op op{};
+    op.kind = Op::kDraw;
+    op.target = r.target;
+    op.draw = r;
+    frameOps_.push_back(op);
     ++stats_.draws;
+  }
+
+  // Render target identity: EDRAM base and format (RB_COLOR_INFO) and pitch
+  // (RB_SURFACE_INFO). Each one gets its own image.
+  static uint64_t TargetOf(const uint8_t* state) {
+    uint32_t surface = xenos::BE32(state + (0x2880 - kStateBegin));
+    uint32_t color = xenos::BE32(state + (0x2884 - kStateBegin));
+    return uint64_t(color & 0x000F0FFF) << 16 | (surface & 0x3FFF);
+  }
+  static uint32_t PitchOf(uint64_t target) { return uint32_t(target & 0x3FFF); }
+
+  // The game's viewport (PA_CL_VPORT_* at device + 0x2908) in target pixels.
+  static void GameViewport(const uint8_t* state, float v[4]) {
+    auto f = [&](uint32_t off) {
+      uint32_t b = xenos::BE32(state + (off - kStateBegin));
+      float x;
+      std::memcpy(&x, &b, 4);
+      return std::fabs(x);
+    };
+    float xs = f(0x2908), xo = f(0x290C), ys = f(0x2910), yo = f(0x2914);
+    v[0] = xo - xs, v[1] = yo - ys, v[2] = 2 * xs, v[3] = 2 * ys;
   }
 
   // Triangle-list indices for a Xenos primitive over the vertex indices `v`.
@@ -281,7 +344,7 @@ class Renderer {
   bool EndFrame(std::vector<uint8_t>* readback) {
     EndCommandBuffer(uploads_);
     uint32_t imageIndex = 0;
-    VkFramebuffer fb = offscreenFramebuffer_;
+    VkImage present = offscreen_.image;
     if (surface_) {
       VkResult r = swapchain_ ? vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, acquired_, VK_NULL_HANDLE, &imageIndex)
                               : VK_ERROR_OUT_OF_DATE_KHR;
@@ -290,59 +353,127 @@ class Renderer {
         SubmitUploadsOnly();
         return false;
       }
-      fb = framebuffers_[imageIndex];
+      present = swapchainImages_[imageIndex];
     }
+    // The main target is the widest one (the back buffer); its frame goes to
+    // the screen letterboxed to the game's aspect (wider with the widescreen
+    // patch: the game then squeezes a wider view into the same back buffer).
+    uint64_t main = 0;
+    float mainW = 0, mainH = 0;
+    std::map<uint64_t, float> heights;  // lowest row each target uses, in game pixels
+    for (const Op& op : frameOps_) {
+      float bottom = op.kind == Op::kDraw ? op.draw.viewport[1] + op.draw.viewport[3]
+                     : op.kind == Op::kResolve ? op.rect[3] : 0;
+      heights[op.target] = std::max(heights[op.target], bottom);
+      uint32_t pitch = PitchOf(op.target);
+      if (pitch > PitchOf(main) || (pitch == PitchOf(main) && op.target < main)) main = op.target;
+    }
+    for (const Op& op : frameOps_)
+      if (op.kind == Op::kDraw && op.target == main) {
+        mainW = std::max(mainW, op.draw.viewport[0] + op.draw.viewport[2]);
+        mainH = std::max(mainH, op.draw.viewport[1] + op.draw.viewport[3]);
+      }
+    if (mainW < 1 || mainH < 1) mainW = 1280, mainH = 720;
+    float pw = std::min(float(extent_.width), extent_.height * aspect_), ph = pw / aspect_;
+    float sx = pw / mainW, sy = ph / mainH;  // game pixels -> target image pixels
+
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd_, &begin);
-    VkClearValue clear{};
-    clear.color = {{0, 0, 0, 1}};
-    VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rb.renderPass = renderPass_;
-    rb.framebuffer = fb;
-    rb.renderArea = {{0, 0}, {extent_.width, extent_.height}};
-    rb.clearValueCount = 1;
-    rb.pClearValues = &clear;
-    vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
-    // The game renders 1280x720: letterbox it into the target.
-    // Fit the game's frame (16:9, or wider with the widescreen patch) into the target.
-    float scale = std::min(extent_.width / (720.0f * aspect_), extent_.height / 720.0f);
-    float vw = 720.0f * aspect_ * scale, vh = 720.0f * scale;
-    VkViewport viewport{(extent_.width - vw) / 2, (extent_.height - vh) / 2, vw, vh, 0, 1};
-    VkRect2D scissor{{0, 0}, extent_};
-    vkCmdSetViewport(cmd_, 0, 1, &viewport);
-    vkCmdSetScissor(cmd_, 0, 1, &scissor);
     vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 4, sets_, 0, nullptr);
-    for (const Recorded& r : frameDraws_) {
+    Target* current = nullptr;
+    auto endPass = [&] {
+      if (current) vkCmdEndRenderPass(cmd_);
+      current = nullptr;
+    };
+    auto use = [&](uint64_t key) -> Target* {
+      float h = std::max(heights[key], key == main ? mainH : 1.0f);
+      uint32_t w = key == main ? uint32_t(pw + 0.5f) : uint32_t(PitchOf(key) * sx + 0.5f);
+      return TargetImage(key, std::max(w, 1u), std::max(uint32_t(h * sy + 0.5f), 1u));
+    };
+    for (const Op& op : frameOps_) {
+      if (op.kind == Op::kResolve) {
+        endPass();
+        Target* src = use(op.target);
+        Transition(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        Barrier(cmd_, op.resolved->image.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit blit{};
+        blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        blit.srcOffsets[0] = {int32_t(op.rect[0] * sx), int32_t(op.rect[1] * sy), 0};
+        blit.srcOffsets[1] = {std::min(int32_t(op.rect[2] * sx + 0.5f), int32_t(src->width)),
+                              std::min(int32_t(op.rect[3] * sy + 0.5f), int32_t(src->height)), 1};
+        blit.dstOffsets[1] = {int32_t(op.resolved->width), int32_t(op.resolved->height), 1};
+        if (blit.srcOffsets[1].x > blit.srcOffsets[0].x && blit.srcOffsets[1].y > blit.srcOffsets[0].y)
+          vkCmdBlitImage(cmd_, src->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, op.resolved->image.image,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+        Barrier(cmd_, op.resolved->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        continue;
+      }
+      if (!current || current->key != op.target) {
+        endPass();
+        current = use(op.target);
+        Transition(current, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rb.renderPass = renderPass_;
+        rb.framebuffer = current->framebuffer;
+        rb.renderArea = {{0, 0}, {current->width, current->height}};
+        vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
+        VkRect2D scissor{{0, 0}, {current->width, current->height}};
+        vkCmdSetScissor(cmd_, 0, 1, &scissor);
+      }
+      if (op.kind == Op::kClear) {
+        VkClearAttachment ca{VK_IMAGE_ASPECT_COLOR_BIT, 0, {}};
+        ca.clearValue.color = {{((op.color >> 16) & 255) / 255.0f, ((op.color >> 8) & 255) / 255.0f,
+                                (op.color & 255) / 255.0f, (op.color >> 24) / 255.0f}};
+        VkClearRect cr{{{0, 0}, {current->width, current->height}}, 0, 1};
+        vkCmdClearAttachments(cmd_, 1, &ca, 1, &cr);
+        continue;
+      }
+      const Recorded& r = op.draw;
+      VkViewport viewport{r.viewport[0] * sx, r.viewport[1] * sy, r.viewport[2] * sx, r.viewport[3] * sy, 0, 1};
+      if (viewport.width <= 0 || viewport.height <= 0) continue;
+      vkCmdSetViewport(cmd_, 0, 1, &viewport);
       vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipeline);
       uint32_t offsets[3] = {r.vsConst, r.psConst, r.shared};
       vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 4, 1, &sets_[4], 3, offsets);
       VkDeviceSize vo = r.vertexOffset;
       vkCmdBindVertexBuffers(cmd_, 0, 1, &vertices_.buffer, &vo);
-      if (r.indexCount) {
-        vkCmdBindIndexBuffer(cmd_, indices_.buffer, r.indexOffset, r.indexType);
-        vkCmdDrawIndexed(cmd_, r.indexCount, 1, 0, 0, 0);
-      } else {
-        vkCmdDraw(cmd_, r.vertexCount, 1, r.firstVertex, 0);
-      }
+      vkCmdBindIndexBuffer(cmd_, indices_.buffer, r.indexOffset, r.indexType);
+      vkCmdDrawIndexed(cmd_, r.indexCount, 1, 0, 0, 0);
     }
-    vkCmdEndRenderPass(cmd_);
+    endPass();
+
+    // The main target, letterboxed, onto the screen (or the offscreen image).
+    VkImageLayout presentLayout = surface_ ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    Barrier(cmd_, present, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkClearColorValue black{{0, 0, 0, 1}};
+    VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cmd_, present, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+    auto it = targets_.find(main);
+    if (it != targets_.end()) {
+      Target* t = &it->second;
+      Transition(t, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+      VkImageBlit blit{};
+      blit.srcSubresource = blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+      blit.srcOffsets[1] = {int32_t(t->width), int32_t(t->height), 1};
+      int32_t x0 = int32_t((extent_.width - pw) / 2), y0 = int32_t((extent_.height - ph) / 2);
+      blit.dstOffsets[0] = {x0, y0, 0};
+      blit.dstOffsets[1] = {x0 + int32_t(pw), y0 + int32_t(ph), 1};
+      vkCmdBlitImage(cmd_, t->image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, present,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+    }
+    Barrier(cmd_, present, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, presentLayout);
     if (readback) {
       VkBufferImageCopy copy{};
       copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
       copy.imageExtent = {extent_.width, extent_.height, 1};
-      if (surface_) {
-        VkImage image = swapchainImages_[imageIndex];
-        Barrier(cmd_, image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-        vkCmdCopyImageToBuffer(cmd_, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback_.buffer, 1, &copy);
-        Barrier(cmd_, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-      } else {
-        vkCmdCopyImageToBuffer(cmd_, offscreen_.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback_.buffer, 1, &copy);
-      }
+      if (surface_) Barrier(cmd_, present, presentLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+      vkCmdCopyImageToBuffer(cmd_, present, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback_.buffer, 1, &copy);
+      if (surface_) Barrier(cmd_, present, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, presentLayout);
     }
     vkEndCommandBuffer(cmd_);
     VkCommandBuffer cmds[2] = {uploads_, cmd_};
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 2;
     submit.pCommandBuffers = cmds;
@@ -356,13 +487,13 @@ class Renderer {
     vkResetFences(device_, 1, &fence_);
     vkQueueSubmit(queue_, 1, &submit, fence_);
     if (surface_) {
-      VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-      present.waitSemaphoreCount = 1;
-      present.pWaitSemaphores = &rendered_;
-      present.swapchainCount = 1;
-      present.pSwapchains = &swapchain_;
-      present.pImageIndices = &imageIndex;
-      VkResult pr = vkQueuePresentKHR(queue_, &present);
+      VkPresentInfoKHR presentInfo{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+      presentInfo.waitSemaphoreCount = 1;
+      presentInfo.pWaitSemaphores = &rendered_;
+      presentInfo.swapchainCount = 1;
+      presentInfo.pSwapchains = &swapchain_;
+      presentInfo.pImageIndices = &imageIndex;
+      VkResult pr = vkQueuePresentKHR(queue_, &presentInfo);
       if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR || pr == VK_ERROR_SURFACE_LOST_KHR)
         swapchainStale_ = true;
     }
@@ -392,10 +523,6 @@ class Renderer {
   // factory (Android hands out a new window when the app comes back).
   bool Recreate(SurfaceFactory surface = nullptr) {
     vkDeviceWaitIdle(device_);
-    for (VkFramebuffer f : framebuffers_) vkDestroyFramebuffer(device_, f, nullptr);
-    for (VkImageView v : swapchainViews_) vkDestroyImageView(device_, v, nullptr);
-    framebuffers_.clear();
-    swapchainViews_.clear();
     swapchainImages_.clear();
     if (swapchain_) vkDestroySwapchainKHR(device_, swapchain_, nullptr);
     swapchain_ = VK_NULL_HANDLE;
@@ -542,16 +669,18 @@ class Renderer {
     return true;
   }
 
-  bool CreateRenderPass(VkFormat format, VkImageLayout finalLayout) {
+  // Render targets: RGBA8, contents kept between passes (EDRAM-like).
+  static constexpr VkFormat kTargetFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  bool CreateRenderPass() {
     VkAttachmentDescription color{};
-    color.format = format;
+    color.format = kTargetFormat;
     color.samples = VK_SAMPLE_COUNT_1_BIT;
-    color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    color.finalLayout = finalLayout;
+    color.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -588,15 +717,12 @@ class Renderer {
     sc.imageColorSpace = format.colorSpace;
     sc.imageExtent = extent_;
     sc.imageArrayLayers = 1;
-    sc.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    sc.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;  // filled by a blit
     sc.preTransform = transform;
     sc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     sc.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     sc.clipped = VK_TRUE;
     if (vkCreateSwapchainKHR(device_, &sc, nullptr, &swapchain_) != VK_SUCCESS) return Fail("swapchain failed");
-    // The render pass (and the pipelines built against it) outlives swapchain
-    // re-creation; a window keeps its surface format.
-    if (!renderPass_ && !CreateRenderPass(format.format, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)) return Fail("render pass failed");
     uint32_t images = 0;
     vkGetSwapchainImagesKHR(device_, swapchain_, &images, nullptr);
     std::vector<VkImage> list(images);
@@ -605,44 +731,115 @@ class Renderer {
     swapchainBgra_ = format.format == VK_FORMAT_B8G8R8A8_UNORM;
     if (readback_.size < size_t(extent_.width) * extent_.height * 4)
       readback_ = CreateBuffer(size_t(extent_.width) * extent_.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    for (VkImage img : list) {
-      VkImageViewCreateInfo v{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-      v.image = img;
-      v.viewType = VK_IMAGE_VIEW_TYPE_2D;
-      v.format = format.format;
-      v.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-      VkImageView view;
-      vkCreateImageView(device_, &v, nullptr, &view);
-      swapchainViews_.push_back(view);
-      VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-      fb.renderPass = renderPass_;
-      fb.attachmentCount = 1;
-      fb.pAttachments = &view;
-      fb.width = extent_.width;
-      fb.height = extent_.height;
-      fb.layers = 1;
-      VkFramebuffer f;
-      vkCreateFramebuffer(device_, &fb, nullptr, &f);
-      framebuffers_.push_back(f);
-    }
     return true;
   }
 
   bool CreateOffscreen() {
     extent_ = {width_, height_};
-    if (!CreateRenderPass(VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)) return Fail("render pass failed");
     offscreen_ = CreateImage(width_, height_, VK_FORMAT_R8G8B8A8_UNORM,
-                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+                             VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    readback_ = CreateBuffer(size_t(width_) * height_ * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    return true;
+  }
+
+  // ---- Render targets and resolved textures ----
+  struct Target {
+    uint64_t key = 0;
+    Image image;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    uint32_t width = 0, height = 0;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+  };
+  struct Resolved {
+    Image image;
+    int index = -1;
+    uint32_t width = 0, height = 0;
+  };
+  struct Op {
+    enum Kind { kDraw, kClear, kResolve } kind;
+    uint64_t target;
+    Recorded draw;
+    uint32_t color;
+    float rect[4];
+    Resolved* resolved;
+  };
+
+  // The image behind a render target, (re)created at the size this frame needs.
+  Target* TargetImage(uint64_t key, uint32_t w, uint32_t h) {
+    Target& t = targets_[key];
+    if (t.image.image && t.width >= w && t.height >= h) return &t;
+    if (t.image.image) {  // grow: the old one is idle (one frame in flight, waited on)
+      vkDestroyFramebuffer(device_, t.framebuffer, nullptr);
+      DestroyImage(t.image);
+      w = std::max(w, t.width), h = std::max(h, t.height);
+    }
+    t.key = key;
+    t.width = w, t.height = h;
+    t.image = CreateImage(w, h, kTargetFormat,
+                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    t.layout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     fb.renderPass = renderPass_;
     fb.attachmentCount = 1;
-    fb.pAttachments = &offscreen_.view;
-    fb.width = width_;
-    fb.height = height_;
-    fb.layers = 1;
-    vkCreateFramebuffer(device_, &fb, nullptr, &offscreenFramebuffer_);
-    readback_ = CreateBuffer(size_t(width_) * height_ * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    return true;
+    fb.pAttachments = &t.image.view;
+    fb.width = w, fb.height = h, fb.layers = 1;
+    vkCreateFramebuffer(device_, &fb, nullptr, &t.framebuffer);
+    // Start black (EDRAM contents are undefined anyway).
+    Barrier(cmd_, t.image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkClearColorValue black{{0, 0, 0, 1}};
+    VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(cmd_, t.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+    t.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    return &t;
+  }
+
+  void Transition(Target* t, VkImageLayout to) {
+    if (t->layout == to) return;
+    Barrier(cmd_, t->image.image, t->layout, to);
+    t->layout = to;
+  }
+
+  // The texture a resolve writes, keyed by its guest address; registered in
+  // the texture heap once, sampled by index like any decoded texture.
+  Resolved* ResolvedFor(const xenos::TextureFetch& t) {
+    uint64_t key = uint64_t(t.base) << 32 | t.width << 16 | t.height;
+    auto it = resolved_.find(key);
+    if (it != resolved_.end()) return &it->second;
+    if (textureCount_ >= kMaxTextures) return nullptr;
+    Resolved& r = resolved_[key];
+    r.width = t.width, r.height = t.height;
+    r.image = CreateImage(t.width, t.height, kTargetFormat,
+                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    // Black until the first resolve lands (in this frame's upload commands).
+    if (!uploadsBegun_) {
+      VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+      vkBeginCommandBuffer(uploads_, &begin);
+      uploadsBegun_ = true;
+    }
+    Barrier(uploads_, r.image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkClearColorValue black{{0, 0, 0, 0}};
+    VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdClearColorImage(uploads_, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+    Barrier(uploads_, r.image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    r.index = int(textureCount_++);
+    resolvedByBase_[t.base] = &r;
+    VkDescriptorImageInfo ii{VK_NULL_HANDLE, r.image.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = sets_[0];
+    w.dstArrayElement = uint32_t(r.index);
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    w.pImageInfo = &ii;
+    vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    stats_.textures = textureCount_;
+    return &r;
+  }
+
+  void DestroyImage(Image& img) {
+    vkDestroyImageView(device_, img.view, nullptr);
+    vkDestroyImage(device_, img.image, nullptr);
+    vkFreeMemory(device_, img.memory, nullptr);
+    img = Image{};
   }
 
   static constexpr uint32_t kMaxTextures = 1024, kMaxSamplers = 16;
@@ -871,6 +1068,7 @@ class Renderer {
   }
 
   int Texture(const xenos::TextureFetch& t, const uint8_t* fetch) {
+    if (auto rit = resolvedByBase_.find(t.base); rit != resolvedByBase_.end()) return rit->second->index;
     uint64_t key = uint64_t(xenos::BE32(fetch + 4)) << 32 | xenos::BE32(fetch + 8);
     auto it = textures_.find(key);
     if (it != textures_.end()) {
@@ -1092,14 +1290,11 @@ class Renderer {
   uint32_t queueFamily_ = 0;
   VkCommandPool cmdPool_ = VK_NULL_HANDLE;
   VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
-  std::vector<VkFramebuffer> framebuffers_;
   std::vector<VkImage> swapchainImages_;
-  std::vector<VkImageView> swapchainViews_;
   bool swapchainStale_ = false;
   bool swapchainBgra_ = false;
   VkRenderPass renderPass_ = VK_NULL_HANDLE;
   Image offscreen_;
-  VkFramebuffer offscreenFramebuffer_ = VK_NULL_HANDLE;
   Buffer readback_, constants_, vertices_, indices_, staging_;
   VkDescriptorSetLayout setLayouts_[5]{};
   VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
@@ -1109,7 +1304,10 @@ class Renderer {
   VkSemaphore acquired_ = VK_NULL_HANDLE, rendered_ = VK_NULL_HANDLE;
   VkCommandBuffer cmd_ = VK_NULL_HANDLE, uploads_ = VK_NULL_HANDLE;
   bool uploadsBegun_ = false;
-  std::vector<Recorded> frameDraws_;
+  std::vector<Op> frameOps_;
+  std::map<uint64_t, Target> targets_;
+  std::unordered_map<uint64_t, Resolved> resolved_;
+  std::unordered_map<uint32_t, Resolved*> resolvedByBase_;
   std::unordered_map<uint64_t, TextureEntry> textures_;
   uint32_t textureCount_ = 0;
   std::unordered_map<uint64_t, VkShaderModule> modules_;

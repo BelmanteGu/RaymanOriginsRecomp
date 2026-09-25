@@ -12,6 +12,8 @@
 #include "vk_renderer.h"  // native::DrawCall
 
 void RaymanNativeRendererDraw(const native::DrawCall& call);  // native_renderer.cpp
+void RaymanNativeRendererClear(const uint8_t* state, uint32_t argb);
+void RaymanNativeRendererResolve(const uint8_t* state, const int32_t* rect, const uint8_t* destFetch);
 
 #define XXH_INLINE_ALL
 #include <xxhash.h>
@@ -343,6 +345,16 @@ REX_HOOK_RAW(sub_826D7128) {
 // the destination texture's fetch constant is at texture + 0x18. The source is
 // the current render target: RB_SURFACE_INFO / RB_COLOR_INFO at device + 0x2880 / 0x2884.
 REX_HOOK_RAW(sub_826D9588) {
+  if (Enabled()) {
+    uint32_t device = ctx.r3.u32, flags = ctx.r4.u32, rect = ctx.r5.u32, tex = ctx.r6.u32;
+    // Color resolves only (bit 2: depth/stencil), into a texture.
+    if (tex && !(flags & 4)) {
+      int32_t r[4];
+      if (rect) for (int i = 0; i < 4; ++i) r[i] = int32_t(LoadBE32(rect + 4 * i));
+      RaymanNativeRendererResolve(g_rayman_membase + device + native::kStateBegin, rect ? r : nullptr,
+                                  g_rayman_membase + tex + 0x18);
+    }
+  }
   if (std::getenv("RAYMAN_NATIVE_CAPTURE") && g_frame % 120 == 0) {
     uint32_t device = ctx.r3.u32, tex = ctx.r6.u32, rect = ctx.r5.u32;
     uint32_t f1 = tex ? LoadBE32(tex + 0x18 + 4) : 0, f2 = tex ? LoadBE32(tex + 0x18 + 8) : 0;
@@ -356,6 +368,10 @@ REX_HOOK_RAW(sub_826D9588) {
 }
 
 REX_HOOK_RAW(sub_826D6B98) {
+  // Clear(device, count, rects, flags, color, z, stencil): bit 0 of flags = color.
+  if (Enabled() && (ctx.r6.u32 & 1)) {
+    RaymanNativeRendererClear(g_rayman_membase + ctx.r3.u32 + native::kStateBegin, ctx.r7.u32);
+  }
   if (std::getenv("RAYMAN_NATIVE_CAPTURE") && g_frame % 120 == 0) {
     uint32_t device = ctx.r3.u32;
     CAPTURE_LOG("clear count %u flags %X color %08X z %g surface %08X color %08X", ctx.r4.u32, ctx.r6.u32,
