@@ -7,6 +7,10 @@
 // SPIR-V is read from RAYMAN_NATIVE_SPIRV (default: private/native/shaders_by_hash,
 // relative to the repository root), as <HASH>_vs.spv / <HASH>_ps.spv.
 #include <SDL3/SDL.h>
+#if defined(__ANDROID__)
+#include <android/native_window.h>
+#include <dlfcn.h>
+#endif
 #include <SDL3/SDL_metal.h>
 #include <SDL3/SDL_vulkan.h>
 
@@ -85,6 +89,12 @@ void RaymanNativeRendererInit() {
       VkAndroidSurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
       info.window = static_cast<ANativeWindow*>(SDL_GetPointerProperty(
           SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+      // The game runs at 60 fps: ask for a 60 Hz display mode rather than 120.
+      // ANativeWindow_setFrameRate is API 30+; look it up so API 29 still loads.
+      using SetFrameRate = int32_t (*)(ANativeWindow*, float, int8_t);
+      if (auto set = reinterpret_cast<SetFrameRate>(dlsym(RTLD_DEFAULT, "ANativeWindow_setFrameRate"))) {
+        set(info.window, 60.0f, 1 /* ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE */);
+      }
       VkSurfaceKHR surface = VK_NULL_HANDLE;
       vkCreateAndroidSurfaceKHR(instance, &info, nullptr, &surface);
       return surface;
@@ -166,7 +176,8 @@ void RaymanNativeRendererPresent() {
   // With RAYMAN_CAPTURE=1, save the native frame every 10 s next to the
   // emulated captures (captures/native_NNN.ppm).
   static auto start = std::chrono::steady_clock::now();
-  static int nextShot = 10;
+  static const int interval = std::getenv("RAYMAN_CAPTURE_INTERVAL") ? std::atoi(std::getenv("RAYMAN_CAPTURE_INTERVAL")) : 10;
+  static int nextShot = interval;
   bool shot = std::getenv("RAYMAN_CAPTURE") &&
               std::chrono::steady_clock::now() - start >= std::chrono::seconds(nextShot);
   std::vector<uint8_t> pixels;
@@ -181,7 +192,7 @@ void RaymanNativeRendererPresent() {
       std::fclose(f);
       NATIVE_LOG("saved %s", name);
     }
-    nextShot += 10;
+    nextShot += interval;
   }
   static int frames = 0;
   if (++frames % 300 == 0) {

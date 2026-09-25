@@ -113,15 +113,15 @@ inline void DecodeAlphaDxt5(const uint8_t* b, uint8_t rgba[16][4]) {
 }
 
 inline bool Supported(uint32_t format) {
-  return format == 0x12 || format == 0x13 || format == 0x14 || format == 0x06;
+  return format == 0x12 || format == 0x13 || format == 0x14 || format == 0x06 || format == 0x02;
 }
 
 // Decodes the top mip of a 2D texture to RGBA8 (width*height*4 bytes).
 inline bool DecodeTexture(const MemoryReader& memory, const TextureFetch& t, std::vector<uint8_t>& rgba) {
   bool block = t.format == 0x12 || t.format == 0x13 || t.format == 0x14;
-  uint32_t blockBytes = t.format == 0x12 ? 8 : block ? 16 : t.format == 0x06 ? 4 : 0;
+  uint32_t blockBytes = t.format == 0x12 ? 8 : block ? 16 : t.format == 0x06 ? 4 : t.format == 0x02 ? 1 : 0;
   if (!blockBytes) return false;
-  uint32_t log2 = blockBytes == 16 ? 4 : blockBytes == 8 ? 3 : 2;
+  uint32_t log2 = blockBytes == 16 ? 4 : blockBytes == 8 ? 3 : blockBytes == 4 ? 2 : 0;
   uint32_t bw = block ? (t.width + 3) / 4 : t.width, bh = block ? (t.height + 3) / 4 : t.height;
   uint32_t pitch = std::max(t.pitch / (block ? 4 : 1), (bw + 31) & ~31u);
   uint32_t ox = 0, oy = 0;  // base level offset inside a packed mip tile, in blocks
@@ -143,6 +143,15 @@ inline bool DecodeTexture(const MemoryReader& memory, const TextureFetch& t, std
       uint32_t off = t.tiled ? uint32_t(GetTiledOffset2D(bx + ox, by + oy, pitch, log2)) : (by * pitch + bx) * blockBytes;
       uint8_t blk[16];
       std::memcpy(blk, src + off, blockBytes);
+      if (blockBytes == 1) {
+        // k_8: one channel. The endian swap works on 32-bit groups, so read the
+        // byte from its swapped position within the group.
+        uint32_t lane = off & 3, swapped = t.endian == 2 ? 3 - lane : t.endian == 1 ? lane ^ 1 : lane;
+        uint8_t v = src[(off & ~3u) + swapped];
+        uint8_t* o = &rgba[(size_t(by) * t.width + bx) * 4];
+        o[0] = o[1] = o[2] = o[3] = v;
+        continue;
+      }
       Swap(blk, blockBytes, t.endian);
       if (!block) {
         // D3DFMT_A8R8G8B8 on k_8_8_8_8: after the 8in32 swap the bytes are B G R A.

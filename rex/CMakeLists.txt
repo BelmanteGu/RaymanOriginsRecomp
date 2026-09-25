@@ -43,7 +43,7 @@ endif()
 rexglue_setup_target(rayman GPU_PLUGINS xenos)
 
 if(ANDROID)
-    target_link_libraries(rayman PRIVATE log)
+    target_link_libraries(rayman PRIVATE log android)
 endif()
 
 # Native renderer (tools/native_renderer): Vulkan through volk.

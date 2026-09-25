@@ -42,6 +42,7 @@ void RaymanAudioDump(PPCRegister& r4) {
 #include <rex/hook.h>
 
 #include <chrono>
+#include <thread>
 
 #if defined(__ANDROID__)
 #include <android/log.h>
@@ -60,6 +61,24 @@ REX_HOOK_RAW(sub_826D41B8) {
   static int frames = 0;
   static double worst_ms = 0;
   __imp__sub_826D41B8(ctx, base);
+  // Frame limiter: the game's logic advances once per presented frame, so a
+  // 120 Hz display (Galaxy S23, ProMotion Macs) would run it twice as fast.
+  // RAYMAN_FPS_LIMIT overrides the default of 60 (0 disables it).
+  static const double limit = [] {
+    const char* v = std::getenv("RAYMAN_FPS_LIMIT");
+    return v ? std::atof(v) : 60.0;
+  }();
+  if (limit > 0) {
+    static clock::time_point next = clock::now();
+    const auto period = std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(1.0 / limit));
+    next += period;
+    auto now_before = clock::now();
+    if (next < now_before - period * 2) {
+      next = now_before;  // fell behind (loading, a hitch): don't try to catch up
+    } else {
+      std::this_thread::sleep_until(next);
+    }
+  }
   RaymanNativeCaptureFrame();
   RaymanNativeRendererPresent();
   auto now = clock::now();

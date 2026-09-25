@@ -22,6 +22,21 @@ cp "$BUILD/librayman.so" "$LIBS/"
 cp "$REXSDK/lib/librexruntime.so" "$REXSDK/lib/librexgpu-xenos.so" "$REXSDK/lib/librexgpu-null.so" "$LIBS/"
 cp "$NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$LIBS/"
 
+# Game-derived files packed into this local APK (never committed, never
+# published): the SPIR-V shaders from tools/native_renderer/build_spirv.sh and
+# optional launcher art from private/launcher.
+SPIRV=${RAYMAN_SPIRV:-$P/private/native/spirv_ubo}
+rm -rf "$A/app/src/main/assets/spirv"
+if [ -d "$SPIRV" ]; then
+    mkdir -p "$A/app/src/main/assets/spirv"
+    cp "$SPIRV"/*.spv "$A/app/src/main/assets/spirv/"
+fi
+rm -rf "$A/app/src/main/assets/launcher"
+if [ -d "$P/private/launcher" ]; then
+    mkdir -p "$A/app/src/main/assets/launcher"
+    cp "$P/private/launcher"/* "$A/app/src/main/assets/launcher/"
+fi
+
 [ -f "$A/local.properties" ] || echo "sdk.dir=$SDK" > "$A/local.properties"
 
 cd "$A"
