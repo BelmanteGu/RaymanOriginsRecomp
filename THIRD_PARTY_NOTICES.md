@@ -42,6 +42,10 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## o1heap — MIT
+
+Included as a git submodule (`thirdparty/o1heap`, https://github.com/pavel-kirienko/o1heap). Copyright (c) Pavel Kirienko. See `thirdparty/o1heap/LICENSE`.
+
 ## Unleashed Recompiled — GPL-3.0
 
 The runtime layout (guest thread block, memory reservation) follows https://github.com/hedge-dev/UnleashedRecomp. Code ported from it keeps its GPL-3.0 license, which is also this project's license.

@@ -5,7 +5,10 @@
 #include <cstring>
 #include "memory.h"
 #include "loader.h"
+#include "crash_handler.h"
 #include "cpu/guest_context.h"
+#include "kernel/heap.h"
+#include "kernel/memory_layout.h"
 
 // Layout do bloco da thread, igual ao do Unleashed Recompiled (cpu/guest_thread.cpp).
 constexpr uint32_t PCR_SIZE = 0xAB0;
@@ -20,8 +23,7 @@ static void Store32(uint32_t guest, uint32_t value)
 
 static void InitThreadContext(PPCContext& ctx, uint32_t cpuNumber, uint32_t threadId)
 {
-    uint32_t block = RuntimeAlloc(PCR_SIZE + TLS_SIZE + TEB_SIZE + STACK_SIZE, 0x1000);
-    memset(g_memory.Translate(block), 0, PCR_SIZE + TLS_SIZE + TEB_SIZE + STACK_SIZE);
+    uint32_t block = g_memory.MapVirtual(g_runtimeHeap.AllocZeroed(PCR_SIZE + TLS_SIZE + TEB_SIZE + STACK_SIZE));
 
     uint32_t tls = block + PCR_SIZE;
     uint32_t teb = tls + TLS_SIZE;
@@ -45,6 +47,8 @@ int main(int argc, char** argv)
 
     if (!g_memory.Init())
         return 1;
+    InstallCrashHandler();
+    InitGuestHeaps();
 
     LoadedImage image;
     if (!LoadXexImage(xexPath, g_memory.base, image))

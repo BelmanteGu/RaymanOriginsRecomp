@@ -45,9 +45,22 @@ add_executable(rayman
     runtime/main.cpp
     runtime/memory.cpp
     runtime/loader.cpp
+    runtime/crash_handler.cpp
     runtime/kernel/stub_log.cpp
+    runtime/kernel/heap.cpp
+    runtime/kernel/page_heap.cpp
+    runtime/kernel/memory_imports.cpp
+    thirdparty/o1heap/o1heap/o1heap.c
     ${IMPORT_STUBS}
 )
-target_include_directories(rayman PRIVATE runtime ${CMAKE_CURRENT_SOURCE_DIR}/runtime/kernel)
-target_compile_options(rayman PRIVATE -O1 -g -fno-strict-aliasing -ffp-model=strict)
+target_include_directories(rayman PRIVATE
+    runtime
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime/kernel
+    ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/o1heap/o1heap
+)
+target_compile_options(rayman PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-O1 -g -fno-strict-aliasing -ffp-model=strict>)
 target_link_libraries(rayman PRIVATE RaymanRecompLib XenonUtils)
+if (APPLE)
+    # Exporta os símbolos (sub_XXXXXXXX) para o relatório de crash usar dladdr.
+    target_link_options(rayman PRIVATE -Wl,-export_dynamic)
+endif()

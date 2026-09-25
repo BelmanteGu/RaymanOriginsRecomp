@@ -1,5 +1,4 @@
 #include "memory.h"
-#include <atomic>
 #include <cstdio>
 #include <sys/mman.h>
 
@@ -31,16 +30,4 @@ bool GuestMemory::Init()
 
     fprintf(stderr, "[memory] guest base = %p\n", (void*)base);
     return true;
-}
-
-uint32_t RuntimeAlloc(uint32_t size, uint32_t align)
-{
-    static std::atomic<uint32_t> next{ 0x70000000 };
-    uint32_t cur = next.load();
-    uint32_t addr;
-    do
-    {
-        addr = (cur + align - 1) & ~(align - 1);
-    } while (!next.compare_exchange_weak(cur, addr + size));
-    return addr;
 }

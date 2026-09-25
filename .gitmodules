@@ -2,3 +2,6 @@
 	path = tools/XenonRecomp
 	url = https://github.com/BelmanteGu/XenonRecomp.git
 	branch = rayman-port
+[submodule "thirdparty/o1heap"]
+	path = thirdparty/o1heap
+	url = https://github.com/pavel-kirienko/o1heap.git
