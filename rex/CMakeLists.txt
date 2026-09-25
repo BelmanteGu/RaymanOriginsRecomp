@@ -14,6 +14,7 @@ include(generated/rexglue.cmake)
 set(RAYMAN_SOURCES
     src/main.cpp
     src/hooks.cpp
+    src/android_touch.cpp
 )
 
 if(ANDROID)
