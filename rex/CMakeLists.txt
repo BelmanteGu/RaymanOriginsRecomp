@@ -16,10 +16,24 @@ set(RAYMAN_SOURCES
     src/hooks.cpp
 )
 
-if(WIN32)
+if(ANDROID)
+    # SDLActivity loads the game as a shared library and calls SDL_main.
+    add_library(rayman SHARED ${RAYMAN_SOURCES})
+elseif(WIN32)
     add_executable(rayman WIN32 ${RAYMAN_SOURCES})
 else()
     add_executable(rayman ${RAYMAN_SOURCES})
 endif()
 
-rexglue_setup_target(rayman)
+if(ANDROID)
+    # The SDK installed for Android ships an Android rexglue binary; codegen
+    # runs on the build machine, so point the tool at a host SDK.
+    set(REXGLUE_HOST_TOOL "" CACHE FILEPATH "Host rexglue binary for codegen when cross-compiling")
+    if(REXGLUE_HOST_TOOL)
+        set_target_properties(rex::rexglue PROPERTIES
+            IMPORTED_LOCATION_RELEASE "${REXGLUE_HOST_TOOL}"
+            IMPORTED_LOCATION "${REXGLUE_HOST_TOOL}")
+    endif()
+endif()
+
+rexglue_setup_target(rayman GPU_PLUGINS xenos)
