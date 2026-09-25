@@ -81,6 +81,7 @@ public class TouchControls extends View {
     private static final Object STICK = new Object();
     private float stickBaseX, stickBaseY, stickX, stickY, stickRadius;
     private boolean stickActive;
+    private int stickPointer = -1;
     private int pressed;         // bitmask of SDL buttons
     private boolean rtPressed;
 
@@ -101,9 +102,7 @@ public class TouchControls extends View {
     void applyPreferences() {
         boolean visible = prefs.getBoolean(KEY_VISIBLE, true);
         nativeSetEnabled(visible);
-        if (!visible) {
-            releaseAll();
-        }
+        releaseAll();
         requestLayout();
         invalidate();
     }
@@ -215,84 +214,93 @@ public class TouchControls extends View {
         boolean visible = prefs.getBoolean(KEY_VISIBLE, true);
         int action = e.getActionMasked();
         int index = e.getActionIndex();
-        switch (action) {
-            case MotionEvent.ACTION_DOWN:
-            case MotionEvent.ACTION_POINTER_DOWN: {
-                int id = e.getPointerId(index);
-                float x = e.getX(index), y = e.getY(index);
-                Button hit = hitTest(x, y);
-                if (hit != null && hit.id == BTN_SETTINGS) {
-                    if (settingsListener != null) {
-                        settingsListener.onOpenSettings();
-                    }
-                    return true;
-                }
-                if (!visible) {
-                    return false;
-                }
-                if (hit != null) {
-                    pointers.put(id, hit);
-                } else if (x < getWidth() * 0.45f) {
-                    // Floating stick: re-center under the thumb.
-                    pointers.put(id, STICK);
-                    stickActive = true;
-                    stickBaseX = stickX = x;
-                    stickBaseY = stickY = y;
-                }
-                break;
-            }
-            case MotionEvent.ACTION_MOVE:
-                if (!visible) {
-                    return false;
-                }
-                for (int i = 0; i < e.getPointerCount(); i++) {
-                    int id = e.getPointerId(i);
-                    Object held = pointers.get(id);
-                    float x = e.getX(i), y = e.getY(i);
-                    if (held == STICK) {
-                        float dx = x - stickBaseX, dy = y - stickBaseY;
-                        float len = (float) Math.hypot(dx, dy);
-                        if (len > stickRadius) {
-                            dx *= stickRadius / len;
-                            dy *= stickRadius / len;
-                        }
-                        stickX = stickBaseX + dx;
-                        stickY = stickBaseY + dy;
-                    } else if (held != null) {
-                        // Slide between buttons (e.g. from A onto X).
-                        Button hit = hitTest(x, y);
-                        if (hit != null && hit.id != BTN_SETTINGS) {
-                            pointers.put(id, hit);
-                        }
-                    }
-                }
-                break;
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_POINTER_UP: {
-                int id = e.getPointerId(index);
-                if (pointers.get(id) == STICK) {
-                    stickActive = false;
-                    layoutButtons(getWidth(), getHeight());
-                }
-                pointers.remove(id);
-                break;
-            }
-            case MotionEvent.ACTION_CANCEL:
+
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+            float x = e.getX(index), y = e.getY(index);
+            Button hit = hitTest(x, y, null);
+            if (hit != null && hit.id == BTN_SETTINGS) {
+                // The dialog takes the focus and this view may never see the
+                // matching "up" events: let go of everything first.
                 releaseAll();
-                break;
-            default:
+                if (settingsListener != null) {
+                    settingsListener.onOpenSettings();
+                }
                 return true;
+            }
+            if (!visible) {
+                return false;
+            }
+            if (hit == null && stickPointer < 0 && x < getWidth() * 0.45f) {
+                // Floating stick: re-center under the thumb.
+                stickPointer = e.getPointerId(index);
+                stickBaseX = stickX = x;
+                stickBaseY = stickY = y;
+            }
+        }
+        if (!visible) {
+            return false;
+        }
+        if (action == MotionEvent.ACTION_CANCEL) {
+            releaseAll();
+            return true;
+        }
+
+        // The state is rebuilt from the pointers still on the screen on every
+        // event, so a lost "up" can never leave a button stuck. On UP and
+        // POINTER_UP the lifted pointer is still reported, so it is skipped.
+        int lifted = (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP)
+                ? e.getPointerId(index) : -1;
+        SparseArray<Object> next = new SparseArray<>();
+        boolean stickAlive = false;
+        for (int i = 0; i < e.getPointerCount(); i++) {
+            int id = e.getPointerId(i);
+            if (id == lifted) {
+                continue;
+            }
+            float x = e.getX(i), y = e.getY(i);
+            if (id == stickPointer) {
+                stickAlive = true;
+                float dx = x - stickBaseX, dy = y - stickBaseY;
+                float len = (float) Math.hypot(dx, dy);
+                if (len > stickRadius) {
+                    dx *= stickRadius / len;
+                    dy *= stickRadius / len;
+                }
+                stickX = stickBaseX + dx;
+                stickY = stickBaseY + dy;
+                next.put(id, STICK);
+                continue;
+            }
+            Object current = pointers.get(id);
+            Button b = hitTest(x, y, current instanceof Button ? (Button) current : null);
+            if (b != null && b.id != BTN_SETTINGS) {
+                next.put(id, b);
+            }
+        }
+        if (!stickAlive) {
+            stickPointer = -1;
+        }
+        pointers.clear();
+        for (int i = 0; i < next.size(); i++) {
+            pointers.put(next.keyAt(i), next.valueAt(i));
         }
         publish();
         invalidate();
         return true;
     }
 
-    private Button hitTest(float x, float y) {
+    /**
+     * The button under (x, y). A finger already holding `current` keeps it
+     * while it stays within 1.6x its radius, so holding jump to glide survives
+     * a drifting thumb; otherwise the closest button within 1.25x wins.
+     */
+    private Button hitTest(float x, float y, Button current) {
+        if (current != null && Math.hypot(x - current.cx, y - current.cy) <= current.r * 1.6f) {
+            return current;
+        }
         Button best = null;
         float bestDist = Float.MAX_VALUE;
         for (Button b : buttons) {
-            // A little slop so near misses still land on the closest button.
             if (b.contains(x, y, b.r * 0.25f)) {
                 float d = (float) Math.hypot(x - b.cx, y - b.cy);
                 if (d < bestDist) {
@@ -304,22 +312,26 @@ public class TouchControls extends View {
         return best;
     }
 
-    private void releaseAll() {
+    /** Lets go of everything: on cancel, focus loss, pause and settings. */
+    void releaseAll() {
         pointers.clear();
-        stickActive = false;
-        layoutButtons(getWidth(), getHeight());
+        stickPointer = -1;
         publish();
+        invalidate();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        releaseAll();
+        super.onDetachedFromWindow();
     }
 
     private void publish() {
         int mask = 0;
         boolean rt = false;
-        boolean stick = false;
         for (int i = 0; i < pointers.size(); i++) {
             Object held = pointers.valueAt(i);
-            if (held == STICK) {
-                stick = true;
-            } else if (held instanceof Button) {
+            if (held instanceof Button) {
                 Button b = (Button) held;
                 if (b.id == BTN_RT) {
                     rt = true;
@@ -330,9 +342,12 @@ public class TouchControls extends View {
         }
         pressed = mask;
         rtPressed = rt;
-        stickActive = stick;
+        stickActive = stickPointer >= 0;
+        if (!stickActive) {
+            layoutButtons(getWidth(), getHeight());  // knob back to its rest spot
+        }
         float lx = 0, ly = 0;
-        if (stick && stickRadius > 0) {
+        if (stickActive && stickRadius > 0) {
             lx = (stickX - stickBaseX) / stickRadius;
             ly = (stickY - stickBaseY) / stickRadius;
         }
