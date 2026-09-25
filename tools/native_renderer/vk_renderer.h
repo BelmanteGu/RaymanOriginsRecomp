@@ -17,6 +17,7 @@
 #include <volk.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -38,6 +39,7 @@ struct DrawCall {
   uint32_t primitive, baseVertex, startIndex, indexCount;
   uint64_t vs, ps;       // XXH3 hashes of the shader containers
   uint32_t ibWord0, ibAddress;
+  const uint8_t* upData = nullptr;  // DrawVerticesUP: the vertices (host pointer, big-endian)
 };
 
 class Renderer {
@@ -134,12 +136,13 @@ class Renderer {
   }
 
   // Captures one draw: copies its vertices, indices and constants right away,
-  // since the game reuses the memory after the call.
+  // since the game reuses the memory after the call. Every primitive type is
+  // turned into an indexed triangle list (32-bit indices).
   void Draw(const DrawCall& d) {
-    bool indexed = d.entry == 0;
-    bool quads = d.primitive == 13;  // Xenos quad list: 4 vertices per quad
-    if ((d.entry != 0 && d.entry != 1) || (d.primitive != 4 && !quads) || (indexed && !d.ibAddress)) {
-      Skip("draw entry " + std::to_string(d.entry) + " primitive " + std::to_string(d.primitive));
+    uint32_t prim = d.primitive;
+    bool known = prim == 4 || prim == 5 || prim == 6 || prim == 13;  // list, fan, strip, quad list
+    if (d.entry > 2 || !known || (d.entry == 0 && !d.ibAddress) || (d.entry == 2 && !d.upData)) {
+      Skip("draw entry " + std::to_string(d.entry) + " primitive " + std::to_string(prim));
       return;
     }
     VkShaderModule vsm = Module(d.vs, true), psm = Module(d.ps, false);
@@ -147,92 +150,98 @@ class Renderer {
       Skip(std::string("missing SPIR-V ") + Hex(!vsm ? d.vs : d.ps) + (!vsm ? "_vs" : "_ps"));
       return;
     }
-    const Layout* layout = LayoutFor(d.vs);
+    // Stream 0's stride: SetStreamSource keeps stride / 4 in a byte at device + 0x3268 + stream.
+    // DrawVerticesUP passes its own.
+    uint32_t stride = d.entry == 2 ? d.indexCount : uint32_t(d.state[0x3268 - kStateBegin]) * 4;
+    std::string missing;
+    const Layout* layout = LayoutFor(d.vs, stride, &missing);
     if (!layout) {
       std::string in;
       for (uint32_t l : inputs_[d.vs]) in += (in.empty() ? "" : ",") + std::to_string(l);
-      Skip("vertex layout " + Hex(d.vs) + " inputs (" + in + ")");
+      Skip("vertex layout " + Hex(d.vs) + " inputs (" + in + "): " + missing);
       return;
     }
-    if (!indexed) {
-      // DrawVertices: r5 = start vertex, r6 = vertex count.
-      const uint8_t* vf = d.state + 95 * 8;
-      uint32_t vbase = xenos::BE32(vf) & 0x1FFFFFFC, vsize = ((xenos::BE32(vf + 4) >> 2) & 0xFFFFFF) * 4;
-      const uint8_t* vb = memory_(vbase, vsize);
-      if (!vb || !vsize || vertices_.used + vsize > vertices_.size || constants_.used + 16384 > constants_.size) {
-        ++stats_.skipped;
-        return;
+    // The vertices (source and size) and the vertex indices the primitive uses.
+    const uint8_t* vb = nullptr;
+    uint32_t vsize = 0;
+    int64_t vertexBias = 0;  // indexed draws: base vertex
+    std::vector<uint32_t> src;
+    bool resettable = false;
+    if (d.entry == 2) {
+      // DrawVerticesUP(prim, vertexCount, data, stride): vertices inline.
+      uint32_t count = d.baseVertex;
+      vb = d.upData;
+      vsize = count * stride;
+      src.resize(count);
+      for (uint32_t i = 0; i < count; ++i) src[i] = i;
+    } else {
+      const uint8_t* vf = d.state + 95 * 8;  // stream 0 = vertex fetch 95
+      uint32_t vbase = xenos::BE32(vf) & 0x1FFFFFFC;
+      vsize = ((xenos::BE32(vf + 4) >> 2) & 0xFFFFFF) * 4;
+      vb = memory_(vbase, vsize);
+      if (d.entry == 1) {
+        // DrawVertices(prim, start, count).
+        src.resize(d.startIndex);
+        for (uint32_t i = 0; i < d.startIndex; ++i) src[i] = d.baseVertex + i;
+      } else {
+        uint32_t isize = (d.ibWord0 & 0x80000000u) ? 4 : 2;
+        uint32_t ibPhys = (d.ibAddress & 0x1FFFFFFF) + (d.ibAddress >= 0xE0000000u ? 0x1000 : 0);
+        const uint8_t* idx = memory_(ibPhys + d.startIndex * isize, d.indexCount * isize);
+        if (!idx) { ++stats_.skipped; return; }
+        src.resize(d.indexCount);
+        for (uint32_t i = 0; i < d.indexCount; ++i)
+          src[i] = isize == 2 ? uint32_t(idx[i * 2] << 8 | idx[i * 2 + 1]) : xenos::BE32(idx + i * 4);
+        vertexBias = int32_t(d.baseVertex);
+        resettable = true;
       }
-      Recorded r{};
-      r.vertexOffset = CopyVertices(vb, vsize, *layout);
-      r.firstVertex = d.baseVertex;
-      r.vertexCount = d.startIndex;
-      if (quads) {
-        uint32_t count = r.vertexCount / 4;
-        r.indexOffset = indices_.Alloc(size_t(count) * 6 * 4, 4);
-        uint32_t* out = reinterpret_cast<uint32_t*>(indices_.map + r.indexOffset);
-        for (uint32_t q = 0; q < count; ++q) {
-          uint32_t v = r.firstVertex + q * 4;
-          uint32_t tri[6] = {v, v + 1, v + 2, v, v + 2, v + 3};
-          std::memcpy(out + q * 6, tri, sizeof(tri));
-        }
-        r.indexCount = count * 6;
-        r.indexType = VK_INDEX_TYPE_UINT32;
-      }
-      FillConstants(d, r);
-      uint32_t blend = xenos::BE32(d.state + (0x2934 - kStateBegin) + 4);
-      r.pipeline = Pipeline(d.vs, d.ps, vsm, psm, *layout, blend);
-      if (!r.pipeline) { ++stats_.skipped; return; }
-      frameDraws_.push_back(r);
-      ++stats_.draws;
-      return;
     }
-    uint32_t isize = (d.ibWord0 & 0x80000000u) ? 4 : 2;
-    uint32_t ibPhys = (d.ibAddress & 0x1FFFFFFF) + (d.ibAddress >= 0xE0000000u ? 0x1000 : 0);
-    const uint8_t* idx = memory_(ibPhys + d.startIndex * isize, d.indexCount * isize);
-    const uint8_t* vf = d.state + 95 * 8;  // stream 0 = vertex fetch 95
-    uint32_t vbase = xenos::BE32(vf) & 0x1FFFFFFC, vsize = ((xenos::BE32(vf + 4) >> 2) & 0xFFFFFF) * 4;
-    const uint8_t* vb = memory_(vbase, vsize);
-    if (!idx || !vb || !vsize || vertices_.used + vsize > vertices_.size ||
-        indices_.used + d.indexCount * isize > indices_.size || constants_.used + 16384 > constants_.size) {
+    std::vector<uint32_t> tris = Triangles(prim, src, resettable);
+    if (!vb || !vsize || tris.empty() || vertices_.used + vsize > vertices_.size ||
+        indices_.used + tris.size() * 4 > indices_.size || constants_.used + 16384 > constants_.size) {
       ++stats_.skipped;
       return;
     }
     Recorded r{};
-    r.vertexOffset = CopyVertices(vb, vsize, *layout) + size_t(d.baseVertex) * layout->stride;
-    r.indexOffset = indices_.Alloc(d.indexCount * isize, 4);
-    for (uint32_t i = 0; i < d.indexCount; ++i) {
-      if (isize == 2) {
-        uint16_t v = uint16_t(idx[i * 2] << 8 | idx[i * 2 + 1]);
-        std::memcpy(indices_.map + r.indexOffset + i * 2, &v, 2);
-      } else {
-        uint32_t v = xenos::BE32(idx + i * 4);
-        std::memcpy(indices_.map + r.indexOffset + i * 4, &v, 4);
-      }
-    }
-    r.indexCount = d.indexCount;
-    r.indexType = isize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
-    if (quads) {
-      std::vector<uint32_t> in(d.indexCount);
-      for (uint32_t i = 0; i < d.indexCount; ++i)
-        in[i] = isize == 2 ? uint32_t(idx[i * 2] << 8 | idx[i * 2 + 1]) : xenos::BE32(idx + i * 4);
-      uint32_t count = d.indexCount / 4;
-      r.indexOffset = indices_.Alloc(size_t(count) * 6 * 4, 4);
-      uint32_t* out = reinterpret_cast<uint32_t*>(indices_.map + r.indexOffset);
-      for (uint32_t q = 0; q < count; ++q) {
-        const uint32_t* v = &in[q * 4];
-        uint32_t tri[6] = {v[0], v[1], v[2], v[0], v[2], v[3]};
-        std::memcpy(out + q * 6, tri, sizeof(tri));
-      }
-      r.indexCount = count * 6;
-      r.indexType = VK_INDEX_TYPE_UINT32;
-    }
+    r.vertexOffset = CopyVertices(vb, vsize, *layout) + size_t(vertexBias * layout->stride);
+    r.indexOffset = indices_.Alloc(tris.size() * 4, 4);
+    std::memcpy(indices_.map + r.indexOffset, tris.data(), tris.size() * 4);
+    r.indexCount = uint32_t(tris.size());
+    r.indexType = VK_INDEX_TYPE_UINT32;
     FillConstants(d, r);
     uint32_t blend = xenos::BE32(d.state + (0x2934 - kStateBegin) + 4);  // RB_BLENDCONTROL0
     r.pipeline = Pipeline(d.vs, d.ps, vsm, psm, *layout, blend);
     if (!r.pipeline) { ++stats_.skipped; return; }
     frameDraws_.push_back(r);
     ++stats_.draws;
+  }
+
+  // Triangle-list indices for a Xenos primitive over the vertex indices `v`.
+  // Strips and fans restart at the reset index (0xFFFF / 0xFFFFFFFF) when indexed.
+  static std::vector<uint32_t> Triangles(uint32_t prim, const std::vector<uint32_t>& v, bool resettable) {
+    std::vector<uint32_t> out;
+    auto reset = [&](uint32_t i) { return resettable && (i == 0xFFFFu || i == 0xFFFFFFFFu); };
+    if (prim == 4) {
+      out.assign(v.begin(), v.begin() + v.size() / 3 * 3);
+    } else if (prim == 13) {
+      for (size_t q = 0; q + 3 < v.size(); q += 4) out.insert(out.end(), {v[q], v[q + 1], v[q + 2], v[q], v[q + 2], v[q + 3]});
+    } else {
+      size_t begin = 0;
+      for (size_t i = 0; i <= v.size(); ++i) {
+        if (i < v.size() && !reset(v[i])) continue;
+        // Run [begin, i) without reset indices.
+        for (size_t k = begin + 2; k < i; ++k) {
+          if (prim == 6) {
+            // Strip: keep a consistent winding (culling is off, but be exact).
+            bool odd = (k - begin) % 2 == 1;
+            out.insert(out.end(), {v[k - 2], odd ? v[k] : v[k - 1], odd ? v[k - 1] : v[k]});
+          } else {
+            out.insert(out.end(), {v[begin], v[k - 1], v[k]});  // fan
+          }
+        }
+        begin = i + 1;
+      }
+    }
+    return out;
   }
 
   // Vertex data: 8in32 swap of the whole range, then back to memory order for
@@ -274,8 +283,13 @@ class Renderer {
     uint32_t imageIndex = 0;
     VkFramebuffer fb = offscreenFramebuffer_;
     if (surface_) {
-      VkResult r = vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, acquired_, VK_NULL_HANDLE, &imageIndex);
-      if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { FreeFrame(); return false; }
+      VkResult r = swapchain_ ? vkAcquireNextImageKHR(device_, swapchain_, UINT64_MAX, acquired_, VK_NULL_HANDLE, &imageIndex)
+                              : VK_ERROR_OUT_OF_DATE_KHR;
+      if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+        swapchainStale_ = true;
+        SubmitUploadsOnly();
+        return false;
+      }
       fb = framebuffers_[imageIndex];
     }
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -348,7 +362,9 @@ class Renderer {
       present.swapchainCount = 1;
       present.pSwapchains = &swapchain_;
       present.pImageIndices = &imageIndex;
-      vkQueuePresentKHR(queue_, &present);
+      VkResult pr = vkQueuePresentKHR(queue_, &present);
+      if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR || pr == VK_ERROR_SURFACE_LOST_KHR)
+        swapchainStale_ = true;
     }
     vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
     FreeFrame();
@@ -358,6 +374,38 @@ class Renderer {
         for (size_t i = 0; i + 3 < readback->size(); i += 4) std::swap((*readback)[i], (*readback)[i + 2]);
     }
     return true;
+  }
+
+  // Drops the recorded frame without drawing it (no surface: the app is in
+  // the background). Texture uploads are still submitted, since the cache
+  // already counts them as done.
+  void DiscardFrame() {
+    EndCommandBuffer(uploads_);
+    SubmitUploadsOnly();
+  }
+
+  // True after the swapchain stopped matching its surface (resize, rotation,
+  // surface lost): call Recreate().
+  bool stale() const { return swapchainStale_; }
+
+  // New swapchain for the current surface, or for a new surface from the
+  // factory (Android hands out a new window when the app comes back).
+  bool Recreate(SurfaceFactory surface = nullptr) {
+    vkDeviceWaitIdle(device_);
+    for (VkFramebuffer f : framebuffers_) vkDestroyFramebuffer(device_, f, nullptr);
+    for (VkImageView v : swapchainViews_) vkDestroyImageView(device_, v, nullptr);
+    framebuffers_.clear();
+    swapchainViews_.clear();
+    swapchainImages_.clear();
+    if (swapchain_) vkDestroySwapchainKHR(device_, swapchain_, nullptr);
+    swapchain_ = VK_NULL_HANDLE;
+    if (surface) {
+      if (surface_) vkDestroySurfaceKHR(instance_, surface_, nullptr);
+      surface_ = surface(instance_);
+      if (!surface_) return Fail("surface creation failed");
+    }
+    swapchainStale_ = false;
+    return CreateSwapchain();
   }
 
   // Aspect ratio of the frames the game draws (width / height).
@@ -546,14 +594,17 @@ class Renderer {
     sc.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     sc.clipped = VK_TRUE;
     if (vkCreateSwapchainKHR(device_, &sc, nullptr, &swapchain_) != VK_SUCCESS) return Fail("swapchain failed");
-    if (!CreateRenderPass(format.format, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)) return Fail("render pass failed");
+    // The render pass (and the pipelines built against it) outlives swapchain
+    // re-creation; a window keeps its surface format.
+    if (!renderPass_ && !CreateRenderPass(format.format, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)) return Fail("render pass failed");
     uint32_t images = 0;
     vkGetSwapchainImagesKHR(device_, swapchain_, &images, nullptr);
     std::vector<VkImage> list(images);
     vkGetSwapchainImagesKHR(device_, swapchain_, &images, list.data());
     swapchainImages_ = list;
     swapchainBgra_ = format.format == VK_FORMAT_B8G8R8A8_UNORM;
-    readback_ = CreateBuffer(size_t(extent_.width) * extent_.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    if (readback_.size < size_t(extent_.width) * extent_.height * 4)
+      readback_ = CreateBuffer(size_t(extent_.width) * extent_.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     for (VkImage img : list) {
       VkImageViewCreateInfo v{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
       v.image = img;
@@ -562,6 +613,7 @@ class Renderer {
       v.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
       VkImageView view;
       vkCreateImageView(device_, &v, nullptr, &view);
+      swapchainViews_.push_back(view);
       VkFramebufferCreateInfo fb{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
       fb.renderPass = renderPass_;
       fb.attachmentCount = 1;
@@ -738,6 +790,17 @@ class Renderer {
     uploadsBegun_ = false;
   }
 
+  // Submits only the frame's texture uploads (uploads_ already ended), then frees it.
+  void SubmitUploadsOnly() {
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &uploads_;
+    vkResetFences(device_, 1, &fence_);
+    vkQueueSubmit(queue_, 1, &submit, fence_);
+    vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
+    FreeFrame();
+  }
+
   void FreeFrame() {
     VkCommandBuffer cmds[2] = {uploads_, cmd_};
     vkFreeCommandBuffers(device_, cmdPool_, 2, cmds);
@@ -872,23 +935,61 @@ class Renderer {
     return modules_[key] = m;
   }
 
-  // UbiArt vertex formats, measured from captured vertex data (docs/D3D_MAP.md).
-  const Layout* LayoutFor(uint64_t vs) {
+  // UbiArt vertex structs by stride (measured from captured vertex data,
+  // docs/D3D_MAP.md). Locations follow XenosRecomp: 0 position, 1 normal,
+  // 4..7 texcoord 0..3, 8 color, 9 blend indices. D3D patches the vertex
+  // fetches at draw time from the stream stride, so the stride picks the
+  // struct and the shader's inputs pick the attributes from it.
+  struct Attribute {
+    uint32_t location;
+    VkFormat format;
+    uint32_t offset;
+    bool byteOrdered;  // 8-bit integer attribute, kept in memory byte order
+  };
+  static const std::vector<Attribute>* Struct(uint32_t stride) {
+    const VkFormat f2 = VK_FORMAT_R32G32_SFLOAT, f3 = VK_FORMAT_R32G32B32_SFLOAT, f4 = VK_FORMAT_R32G32B32A32_SFLOAT,
+                   c = VK_FORMAT_B8G8R8A8_UNORM, u4 = VK_FORMAT_R8G8B8A8_UINT;
+    static const std::vector<Attribute> pc{{0, f3, 0}, {8, c, 12}};                              // 16
+    static const std::vector<Attribute> pt{{0, f3, 0}, {4, f2, 12}};                             // 20
+    static const std::vector<Attribute> pct{{0, f3, 0}, {8, c, 12}, {4, f2, 16}};                // 24
+    static const std::vector<Attribute> font{{0, f3, 0}, {8, c, 12}, {9, u4, 16, true}, {4, f2, 20}};  // 28
+    static const std::vector<Attribute> pnct{{0, f3, 0}, {1, f3, 12}, {8, c, 24}, {4, f2, 28}};  // 36
+    static const std::vector<Attribute> patch{{0, f3, 0}, {8, c, 12}, {4, f2, 16}, {5, f4, 24}, {6, f4, 40}, {7, f2, 56}};  // 64
+    switch (stride) {
+      case 16: return &pc;
+      case 20: return &pt;
+      case 24: return &pct;
+      case 28: return &font;
+      case 36: return &pnct;
+      case 64: return &patch;
+      default: return nullptr;
+    }
+  }
+
+  const Layout* LayoutFor(uint64_t vs, uint32_t stride, std::string* missing) {
     auto it = inputs_.find(vs);
     if (it == inputs_.end()) return nullptr;
-    const auto& in = it->second;
-    const VkFormat f2 = VK_FORMAT_R32G32_SFLOAT, f3 = VK_FORMAT_R32G32B32_SFLOAT,
-                   f4 = VK_FORMAT_R32G32B32A32_SFLOAT, c = VK_FORMAT_B8G8R8A8_UNORM;
-    static const Layout pct{24, {{0, 0, f3, 0}, {8, 0, c, 12}, {4, 0, f2, 16}}};
-    static const Layout grid{20, {{0, 0, f3, 0}, {4, 0, f2, 12}}};
-    static const Layout patch{64, {{0, 0, f3, 0}, {8, 0, c, 12}, {4, 0, f2, 16}, {5, 0, f4, 24}, {6, 0, f4, 40}, {7, 0, f2, 56}}};
-    if (in == std::vector<uint32_t>{0, 4, 8}) return &pct;
-    if (in == std::vector<uint32_t>{0, 4}) return &grid;
-    if (in == std::vector<uint32_t>{0, 4, 5, 6, 7, 8}) return &patch;
-    // Fonts: position, color, glyph indices (ubyte4), uv; 28 bytes.
-    static const Layout font{28, {{0, 0, f3, 0}, {8, 0, c, 12}, {9, 0, VK_FORMAT_R8G8B8A8_UINT, 16}, {4, 0, f2, 20}}, {16}};
-    if (in == std::vector<uint32_t>{0, 4, 8, 9}) return &font;
-    return nullptr;
+    std::string key = std::to_string(vs) + ":" + std::to_string(stride);
+    auto cached = layouts_.find(key);
+    if (cached != layouts_.end()) return &cached->second;
+    const std::vector<Attribute>* fields = Struct(stride);
+    if (!fields) {
+      *missing = "stride " + std::to_string(stride);
+      return nullptr;
+    }
+    Layout layout{stride, {}, {}};
+    for (uint32_t location : it->second) {
+      const Attribute* a = nullptr;
+      for (const Attribute& f : *fields)
+        if (f.location == location) a = &f;
+      if (!a) {
+        *missing = "location " + std::to_string(location) + " in stride " + std::to_string(stride);
+        return nullptr;
+      }
+      layout.attributes.push_back({location, 0, a->format, a->offset});
+      if (a->byteOrdered) layout.byteOrderedOffsets.push_back(a->offset);
+    }
+    return &(layouts_[key] = layout);
   }
 
   static VkBlendFactor BlendFactor(uint32_t x) {
@@ -913,7 +1014,8 @@ class Renderer {
 
   VkPipeline Pipeline(uint64_t vs, uint64_t ps, VkShaderModule vsm, VkShaderModule psm, const Layout& layout,
                       uint32_t blend) {
-    std::string key = std::to_string(vs) + ":" + std::to_string(ps) + ":" + std::to_string(blend);
+    std::string key = std::to_string(vs) + ":" + std::to_string(ps) + ":" + std::to_string(blend) + ":" +
+                      std::to_string(layout.stride);
     auto it = pipelines_.find(key);
     if (it != pipelines_.end()) return it->second;
     VkPipelineShaderStageCreateInfo stages[2]{};
@@ -992,6 +1094,8 @@ class Renderer {
   VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
   std::vector<VkFramebuffer> framebuffers_;
   std::vector<VkImage> swapchainImages_;
+  std::vector<VkImageView> swapchainViews_;
+  bool swapchainStale_ = false;
   bool swapchainBgra_ = false;
   VkRenderPass renderPass_ = VK_NULL_HANDLE;
   Image offscreen_;
@@ -1011,6 +1115,7 @@ class Renderer {
   std::unordered_map<uint64_t, VkShaderModule> modules_;
   std::unordered_map<uint64_t, std::vector<uint32_t>> inputs_;
   std::unordered_map<std::string, VkPipeline> pipelines_;
+  std::unordered_map<std::string, Layout> layouts_;
   std::map<std::string, uint32_t> skipReasons_;
 };
 
