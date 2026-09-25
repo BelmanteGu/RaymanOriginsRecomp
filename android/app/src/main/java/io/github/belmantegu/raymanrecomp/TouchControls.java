@@ -2,10 +2,12 @@ package io.github.belmantegu.raymanrecomp;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
-import android.graphics.Color;
+import android.graphics.LightingColorFilter;
 import android.graphics.Paint;
-import android.graphics.Typeface;
+import android.graphics.RectF;
 import android.util.SparseArray;
 import android.view.MotionEvent;
 import android.view.View;
@@ -14,8 +16,9 @@ import android.view.View;
  * On-screen Xbox 360 controller for Rayman Origins, drawn over the game.
  *
  * Left side: a floating analog stick (it re-centers where the thumb lands).
- * Right side: A (jump, hold to glide), X (attack), B, Y and RT (run).
- * Top: Back, Start and a settings button.
+ * Right side: jump (A, hold to glide), attack (X), back (B) and run (RT).
+ * Top: select (Back), pause (Start) and the app settings.
+ * Button art: res/drawable-nodpi (docs/TOUCH_BUTTONS.md, GamePad/).
  *
  * The state goes to an SDL3 virtual gamepad (android_touch.cpp), so the game
  * reads it like a physical controller. Visibility, opacity and size are stored
@@ -43,14 +46,13 @@ public class TouchControls extends View {
 
     private static final class Button {
         final int id;
-        final String label;
-        final int color;
+        final int art;  // drawable resource
+        Bitmap bitmap;
         float cx, cy, r;
 
-        Button(int id, String label, int color) {
+        Button(int id, int art) {
             this.id = id;
-            this.label = label;
-            this.color = color;
+            this.art = art;
         }
 
         boolean contains(float x, float y, float slop) {
@@ -59,21 +61,23 @@ public class TouchControls extends View {
         }
     }
 
+    // Y is not used in the game, so it has no button.
     private final Button[] buttons = {
-        new Button(BTN_A, "A", 0xFF5CB85C),
-        new Button(BTN_B, "B", 0xFFD9534F),
-        new Button(BTN_X, "X", 0xFF428BCA),
-        new Button(BTN_Y, "Y", 0xFFF0AD4E),
-        new Button(BTN_RT, "RT", 0xFFBBBBBB),
-        new Button(BTN_BACK, "◀", 0xFFBBBBBB),
-        new Button(BTN_START, "☰", 0xFFBBBBBB),
-        new Button(BTN_SETTINGS, "⚙", 0xFFBBBBBB),
+        new Button(BTN_A, R.drawable.btn_jump),
+        new Button(BTN_B, R.drawable.btn_back),
+        new Button(BTN_X, R.drawable.btn_attack),
+        new Button(BTN_RT, R.drawable.btn_run),
+        new Button(BTN_BACK, R.drawable.btn_select),
+        new Button(BTN_START, R.drawable.btn_pause),
+        new Button(BTN_SETTINGS, R.drawable.btn_settings),
     };
+    private Bitmap stickBase, stickKnob;
 
     private final SharedPreferences prefs;
-    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint art = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    // Pressed buttons are drawn brighter (the art has no pressed state yet).
+    private final LightingColorFilter pressedFilter = new LightingColorFilter(0xFFFFFFFF, 0x00503A00);
+    private final RectF rect = new RectF();
     private SettingsListener settingsListener;
 
     // Pointer id -> what it is holding (a Button, or STICK).
@@ -88,9 +92,9 @@ public class TouchControls extends View {
     public TouchControls(Context context) {
         super(context);
         prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        stroke.setStyle(Paint.Style.STROKE);
-        text.setTextAlign(Paint.Align.CENTER);
-        text.setTypeface(Typeface.DEFAULT_BOLD);
+        for (Button b : buttons) b.bitmap = BitmapFactory.decodeResource(getResources(), b.art);
+        stickBase = BitmapFactory.decodeResource(getResources(), R.drawable.stick_base);
+        stickKnob = BitmapFactory.decodeResource(getResources(), R.drawable.stick_knob);
         setFocusable(false);
     }
 
@@ -112,7 +116,7 @@ public class TouchControls extends View {
     }
 
     private int alpha() {
-        return Math.round(prefs.getInt(KEY_OPACITY, 55) * 2.55f);
+        return Math.round(prefs.getInt(KEY_OPACITY, 80) * 2.55f);
     }
 
     @Override
@@ -132,11 +136,10 @@ public class TouchControls extends View {
         float diamondX = w - margin - face * 3.2f;
         float diamondY = h - margin - face * 3.2f;
         float spread = face * 2.1f;
-        place(BTN_A, diamondX, diamondY + spread, face);
-        place(BTN_B, diamondX + spread, diamondY, face);
+        place(BTN_A, diamondX, diamondY + spread, face * 1.1f);
+        place(BTN_B, diamondX + spread, diamondY, face * 0.85f);
         place(BTN_X, diamondX - spread, diamondY, face);
-        place(BTN_Y, diamondX, diamondY - spread, face);
-        place(BTN_RT, diamondX - spread * 2.2f, diamondY + spread, face * 0.85f);
+        place(BTN_RT, diamondX - spread * 2.2f, diamondY + spread, face * 0.9f);
         float small = 42 * unit;
         place(BTN_BACK, w / 2f - small * 2.5f, margin, small);
         place(BTN_START, w / 2f + small * 2.5f, margin, small);
@@ -146,7 +149,6 @@ public class TouchControls extends View {
             stickBaseX = stickX = margin + stickRadius * 1.3f;
             stickBaseY = stickY = h - margin - stickRadius * 1.3f;
         }
-        text.setTextSize(face * 0.8f);
     }
 
     private void place(int id, float x, float y, float r) {
@@ -169,34 +171,25 @@ public class TouchControls extends View {
                 continue;
             }
             boolean down = isDown(b.id);
-            int base = visible ? a : Math.min(a, 60);
-            fill.setColor(b.color);
-            fill.setAlpha(down ? Math.min(255, base + 90) : base / 2);
-            canvas.drawCircle(b.cx, b.cy, b.r, fill);
-            stroke.setColor(Color.WHITE);
-            stroke.setAlpha(base);
-            stroke.setStrokeWidth(b.r * 0.08f);
-            canvas.drawCircle(b.cx, b.cy, b.r, stroke);
-            text.setColor(Color.WHITE);
-            text.setAlpha(base);
-            float size = text.getTextSize();
-            if (b.r < 50) {
-                text.setTextSize(b.r * 1.1f);
-            }
-            canvas.drawText(b.label, b.cx, b.cy - (text.descent() + text.ascent()) / 2, text);
-            text.setTextSize(size);
+            // The art's paint splashes reach past the touch circle: draw it a bit larger.
+            float half = b.r * (down ? 1.32f : 1.25f);
+            art.setAlpha(visible ? a : Math.min(a, 60));
+            art.setColorFilter(down ? pressedFilter : null);
+            rect.set(b.cx - half, b.cy - half, b.cx + half, b.cy + half);
+            canvas.drawBitmap(b.bitmap, null, rect, art);
         }
+        art.setColorFilter(null);
         if (!visible) {
             return;
         }
-        // Stick: base ring and knob.
-        stroke.setColor(Color.WHITE);
-        stroke.setAlpha(a);
-        stroke.setStrokeWidth(stickRadius * 0.04f);
-        canvas.drawCircle(stickBaseX, stickBaseY, stickRadius, stroke);
-        fill.setColor(Color.WHITE);
-        fill.setAlpha(stickActive ? Math.min(255, a + 60) : a / 2);
-        canvas.drawCircle(stickX, stickY, stickRadius * 0.42f, fill);
+        // Stick: bubble base and stone knob.
+        art.setAlpha(stickActive ? Math.min(255, a + 40) : a);
+        float base = stickRadius * 1.15f;
+        rect.set(stickBaseX - base, stickBaseY - base, stickBaseX + base, stickBaseY + base);
+        canvas.drawBitmap(stickBase, null, rect, art);
+        float knob = stickRadius * 0.55f;
+        rect.set(stickX - knob, stickY - knob, stickX + knob, stickY + knob);
+        canvas.drawBitmap(stickKnob, null, rect, art);
     }
 
     private boolean isDown(int id) {

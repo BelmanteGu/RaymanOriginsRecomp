@@ -7,4 +7,5 @@
     <string name="controls_size">Controls size</string>
     <string name="fill_screen">Fill the whole screen (stretched)</string>
     <string name="restart_needed">Close and reopen the app to apply the screen setting.</string>
+    <string name="native_renderer">Native renderer (no GPU emulation)</string>
 </resources>
