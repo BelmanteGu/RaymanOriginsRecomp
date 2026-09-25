@@ -38,3 +38,7 @@ if(ANDROID)
 endif()
 
 rexglue_setup_target(rayman GPU_PLUGINS xenos)
+
+if(ANDROID)
+    target_link_libraries(rayman PRIVATE log)
+endif()
