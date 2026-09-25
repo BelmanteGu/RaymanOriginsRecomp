@@ -23,6 +23,7 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include "vk_renderer.h"
 
@@ -40,6 +41,10 @@ namespace {
 
 native::Renderer* g_renderer = nullptr;
 SDL_Window* g_window = nullptr;
+native::Renderer::SurfaceFactory g_makeSurface;
+#if defined(__ANDROID__)
+void* g_nativeWindow = nullptr;  // the ANativeWindow the surface was made from
+#endif
 bool g_frameOpen = false;
 std::mutex g_mutex;
 
@@ -61,7 +66,10 @@ void RaymanNativeRendererInit() {
     return;
   }
   NATIVE_LOG("native renderer: starting (%s)", std::getenv("RAYMAN_NATIVE_RENDER"));
-  bool mainWindow = std::string(std::getenv("RAYMAN_NATIVE_RENDER")) == "main";
+  std::string mode = std::getenv("RAYMAN_NATIVE_RENDER");
+  bool mainWindow = mode == "main";
+  // "offscreen": no window at all (tests): draws into an image, captures read it back.
+  bool offscreen = mode == "offscreen";
   std::vector<const char*> exts;
   PFN_vkGetInstanceProcAddr loader = nullptr;
   native::Renderer::SurfaceFactory makeSurface;
@@ -93,6 +101,7 @@ void RaymanNativeRendererInit() {
       VkAndroidSurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
       info.window = static_cast<ANativeWindow*>(SDL_GetPointerProperty(
           SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+      g_nativeWindow = info.window;
       // The game runs at 60 fps: ask for a 60 Hz display mode rather than 120.
       // ANativeWindow_setFrameRate is API 30+; look it up so API 29 still loads.
       using SetFrameRate = int32_t (*)(ANativeWindow*, float, int8_t);
@@ -104,7 +113,7 @@ void RaymanNativeRendererInit() {
       return surface;
     };
 #endif
-  } else {
+  } else if (!offscreen) {
     if (!SDL_Vulkan_GetVkGetInstanceProcAddr() && !SDL_Vulkan_LoadLibrary(nullptr)) {
       NATIVE_LOG("SDL could not load Vulkan: %s", SDL_GetError());
       return;
@@ -126,10 +135,17 @@ void RaymanNativeRendererInit() {
     };
   }
   int w = 0, h = 0;
-  SDL_GetWindowSizeInPixels(g_window, &w, &h);
+  if (offscreen) {
+    // RAYMAN_OFFSCREEN_SIZE=WxH (default 1280x720).
+    w = 1280, h = 720;
+    if (const char* size = std::getenv("RAYMAN_OFFSCREEN_SIZE")) std::sscanf(size, "%dx%d", &w, &h);
+  } else {
+    SDL_GetWindowSizeInPixels(g_window, &w, &h);
+  }
   NATIVE_LOG("native renderer: window %p %dx%d", static_cast<void*>(g_window), w, h);
   auto* renderer = new native::Renderer();
   renderer->log = [](const char* stage) { NATIVE_LOG("native renderer: %s", stage); };
+  g_makeSurface = makeSurface;
   bool ok = renderer->Init(loader, exts, makeSurface, uint32_t(w), uint32_t(h));
   if (!ok) {
     NATIVE_LOG("renderer init failed: %s", renderer->error().c_str());
@@ -179,17 +195,42 @@ void RaymanNativeRendererInit() {
   NATIVE_LOG("native renderer ready (%dx%d), SPIR-V from %s", w, h, dir.c_str());
 }
 
+namespace {
+void OpenFrame() {
+  if (!g_frameOpen) {
+    g_renderer->BeginFrame();
+    g_frameOpen = true;
+  }
+}
+}  // namespace
+
 // Render thread, from the draw hooks (native_capture.cpp).
 void RaymanNativeRendererDraw(const native::DrawCall& call) {
   if (!g_renderer) {
     return;
   }
   std::lock_guard lock(g_mutex);
-  if (!g_frameOpen) {
-    g_renderer->BeginFrame();
-    g_frameOpen = true;
-  }
+  OpenFrame();
   g_renderer->Draw(call);
+}
+
+// Render thread, from the Clear / Resolve hooks. state = device + native::kStateBegin.
+void RaymanNativeRendererClear(const uint8_t* state, uint32_t argb) {
+  if (!g_renderer) {
+    return;
+  }
+  std::lock_guard lock(g_mutex);
+  OpenFrame();
+  g_renderer->Clear(state, argb);
+}
+
+void RaymanNativeRendererResolve(const uint8_t* state, const int32_t* rect, const uint8_t* destFetch) {
+  if (!g_renderer) {
+    return;
+  }
+  std::lock_guard lock(g_mutex);
+  OpenFrame();
+  g_renderer->Resolve(state, rect, destFetch);
 }
 
 // Render thread, from the Present hook.
@@ -209,6 +250,26 @@ void RaymanNativeRendererPresent() {
   bool shot = std::getenv("RAYMAN_CAPTURE") &&
               std::chrono::steady_clock::now() - start >= std::chrono::seconds(nextShot);
   std::vector<uint8_t> pixels;
+#if defined(__ANDROID__)
+  // In the background SDL drops the window (the property goes null) and hands
+  // out a new one when the app comes back: skip frames meanwhile, then build a
+  // surface and swapchain for the new window.
+  void* window = SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+  if (!window) {
+    g_renderer->DiscardFrame();
+    g_frameOpen = false;
+    // Hold the game until the window is back: its logic advances once per
+    // presented frame, so it pauses instead of running unseen.
+    while (!SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr))
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    return;
+  }
+  if (window != g_nativeWindow) {
+    NATIVE_LOG("native renderer: new window %p, recreating the surface", window);
+    if (!g_renderer->Recreate(g_makeSurface)) NATIVE_LOG("recreate failed: %s", g_renderer->error().c_str());
+  }
+#endif
+  if (g_renderer->stale() && !g_renderer->Recreate()) NATIVE_LOG("swapchain: %s", g_renderer->error().c_str());
   g_renderer->EndFrame(shot ? &pixels : nullptr);
   g_frameOpen = false;
   if (shot && !pixels.empty()) {

@@ -13,6 +13,9 @@ How the pieces fit is in [D3D_MAP.md](D3D_MAP.md); the investigation is in [PROG
 
 - `rex/src/native_capture.cpp` hooks the game's D3D: `CreateVertexShader`/`CreatePixelShader` (hashes each shader container with XXH3, the key the SPIR-V is named by) and the three draw entry points.
 - For each draw, `tools/native_renderer/vk_renderer.h` reads the Xenos register shadow that D3D keeps in its device structure: fetch constants, shader constants and render state. It then copies the vertices and indices (big-endian to little-endian), decodes the textures (`xenos_texture.h`: tiling, packed mips, DXT1/3/5, 8888), picks a pipeline for the shaders and blend state, and draws.
+- Draw entry points: DrawIndexed, DrawVertices and DrawVerticesUP (`sub_826D7128`, vertices inline). Triangle lists, strips, fans and quad lists all become indexed triangle lists.
+- Vertex layout: D3D patches the shaders' vertex fetches at draw time from the stream stride (`device + 0x3268 + stream` holds stride / 4), so the stride picks the UbiArt vertex struct (16 PC, 20 PT, 24 PCT, 28 font, 36 PNCT, 64 patch) and the shader's inputs pick attributes from it.
+- Render targets: each draw goes to the target named by `RB_SURFACE_INFO` / `RB_COLOR_INFO` (`device + 0x2880 / 0x2884`) with the game's viewport (`PA_CL_VPORT_*`, `device + 0x2908`). The widest target is the back buffer; it is drawn at screen resolution and blitted to the window, letterboxed. `Clear` (`sub_826D6B98`) clears the current target; `Resolve` (`sub_826D9588`) copies a rectangle of it into a texture registered at the destination address, which later draws sample instead of guest memory (AfterFx glow/blur, refraction).
 - `rexgpu-null` (ReXGlue plugin, `android/rexglue-patches/0003-0004`) keeps the guest GPU protocol running (ring buffer, fences, interrupts, vblank) without drawing, and leaves the window to the native renderer.
 
 The shaders need no 64-bit integers or buffer device addresses (`hlsl_ubo.py` moves XenosRecomp's constants to uniform buffers), so stock Adreno drivers work.
@@ -47,4 +50,12 @@ On Android it is on by default with the native renderer: the app sets a 720-line
 
 ## Status
 
-The title screen and the gameplay captured so far render correctly. Diagnostics: the renderer logs skipped draws and their reason every 300 frames (`[native] skipped xN: ...`). Movies play (quad lists, 8-bit planes, textures refreshed when their content changes). Known gaps: render-to-texture passes and vertex formats not seen yet.
+The title screen, menus, world map and the first level render correctly (checked headless, below). Diagnostics: skipped draws and their reason every 300 frames (`[native] skipped xN: ...`). Movies play (quad lists, 8-bit planes, textures refreshed when their content changes).
+
+Coverage: every texture in the game's bundles (8,358, scanned offline) uses DXT1, DXT2/3, DXT4/5 or 8888, all supported. Still to confirm in-game: the resolve path, in the levels that use AfterFx (jungle levels after the first) and refraction (water levels).
+
+On Android the renderer survives the app going to the background: frames are dropped (and the game held) while there is no window, and the surface and swapchain are rebuilt for the new one.
+
+## Headless test runs (macOS)
+
+No window and no sound, for automated checks: `RAYMAN_NATIVE_RENDER=offscreen` (renderer into an image, `RAYMAN_OFFSCREEN_SIZE=WxH`), `SDL_VIDEO_DRIVER=offscreen`, `--audio_mute=true`, and `RAYMAN_AUTOPILOT` to drive a virtual pad (`rex/src/autopilot.cpp`), e.g. `RAYMAN_AUTOPILOT="18:start,22:a,25:a,50:right,52:jump"`. With `RAYMAN_CAPTURE=1` frames land in `rex/captures/`. Use a separate `HOME` so the run doesn't touch your save.

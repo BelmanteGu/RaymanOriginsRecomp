@@ -15,6 +15,7 @@ set(RAYMAN_SOURCES
     src/main.cpp
     src/hooks.cpp
     src/android_touch.cpp
+    src/autopilot.cpp
     src/native_capture.cpp
     src/native_renderer.cpp
     ../tools/native_renderer/thirdparty/volk/volk.c

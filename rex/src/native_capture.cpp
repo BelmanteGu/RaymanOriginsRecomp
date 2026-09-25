@@ -12,6 +12,8 @@
 #include "vk_renderer.h"  // native::DrawCall
 
 void RaymanNativeRendererDraw(const native::DrawCall& call);  // native_renderer.cpp
+void RaymanNativeRendererClear(const uint8_t* state, uint32_t argb);
+void RaymanNativeRendererResolve(const uint8_t* state, const int32_t* rect, const uint8_t* destFetch);
 
 #define XXH_INLINE_ALL
 #include <xxhash.h>
@@ -64,7 +66,7 @@ struct ShaderInfo {
 };
 
 struct DrawKey {
-  int entry;          // 0 = DrawIndexed (826D7588), 1 = Draw (826D7170), 2 = DrawUP (826D6C68)
+  int entry;          // 0 = DrawIndexed (826D7588), 1 = Draw (826D7170), 2 = DrawVerticesUP (826D7128)
   uint32_t primitive;
   uint64_t vs, ps;
   bool operator<(const DrawKey& o) const {
@@ -124,6 +126,12 @@ void RecordDraw(int entry, const PPCContext& ctx) {
     native::DrawCall call{g_rayman_membase + device + native::kStateBegin, uint32_t(entry), primitive,
                           ctx.r5.u32, ctx.r6.u32, ctx.r7.u32, vsHash, psHash,
                           ib ? LoadBE32(ib) : 0, ib ? LoadBE32(ib + 0x18) : 0};
+    if (entry == 2) {
+      // DrawVerticesUP(device, prim, vertexCount, data, stride): count and
+      // stride go in baseVertex / indexCount, the vertices by pointer.
+      call.startIndex = 0;
+      call.upData = g_rayman_membase + ctx.r6.u32;
+    }
     RaymanNativeRendererDraw(call);
   }
   if (g_dump) {
@@ -289,7 +297,9 @@ REX_EXTERN(__imp__sub_826CD850);  // CreateVertexShader(function) -> shader
 REX_EXTERN(__imp__sub_826CD668);  // CreatePixelShader(function) -> shader
 REX_EXTERN(__imp__sub_826D7588);  // DrawIndexed
 REX_EXTERN(__imp__sub_826D7170);  // Draw
-REX_EXTERN(__imp__sub_826D6C68);  // DrawUP
+REX_EXTERN(__imp__sub_826D7128);  // DrawVerticesUP(prim, vertexCount, data, stride)
+REX_EXTERN(__imp__sub_826D9588);  // Resolve
+REX_EXTERN(__imp__sub_826D6B98);  // Clear
 
 REX_HOOK_RAW(sub_826CD850) {
   uint32_t function = ctx.r3.u32;
@@ -321,9 +331,51 @@ REX_HOOK_RAW(sub_826D7170) {
   __imp__sub_826D7170(ctx, base);
 }
 
-REX_HOOK_RAW(sub_826D6C68) {
+// Not BeginVertices (826D6C68): it only reserves command-buffer space, and the
+// caller copies the vertices after it returns. The public wrapper has them.
+REX_HOOK_RAW(sub_826D7128) {
   if (Enabled()) {
     RecordDraw(2, ctx);
   }
-  __imp__sub_826D6C68(ctx, base);
+  __imp__sub_826D7128(ctx, base);
+}
+
+// Render-target traffic, logged with RAYMAN_NATIVE_CAPTURE (frames multiple of 120).
+// Resolve(device, flags, srcRect, destTexture, destPoint, level, slice, clearColor, ...):
+// the destination texture's fetch constant is at texture + 0x18. The source is
+// the current render target: RB_SURFACE_INFO / RB_COLOR_INFO at device + 0x2880 / 0x2884.
+REX_HOOK_RAW(sub_826D9588) {
+  if (Enabled()) {
+    uint32_t device = ctx.r3.u32, flags = ctx.r4.u32, rect = ctx.r5.u32, tex = ctx.r6.u32;
+    // Color resolves only (bit 2: depth/stencil), into a texture.
+    if (tex && !(flags & 4)) {
+      int32_t r[4];
+      if (rect) for (int i = 0; i < 4; ++i) r[i] = int32_t(LoadBE32(rect + 4 * i));
+      RaymanNativeRendererResolve(g_rayman_membase + device + native::kStateBegin, rect ? r : nullptr,
+                                  g_rayman_membase + tex + 0x18);
+    }
+  }
+  if (std::getenv("RAYMAN_NATIVE_CAPTURE") && g_frame % 120 == 0) {
+    uint32_t device = ctx.r3.u32, tex = ctx.r6.u32, rect = ctx.r5.u32;
+    uint32_t f1 = tex ? LoadBE32(tex + 0x18 + 4) : 0, f2 = tex ? LoadBE32(tex + 0x18 + 8) : 0;
+    CAPTURE_LOG("resolve flags %X rect %s(%d,%d,%d,%d) dest %08X fmt %u base %08X %ux%u surface %08X color %08X",
+                ctx.r4.u32, rect ? "" : "none", rect ? int(LoadBE32(rect)) : 0, rect ? int(LoadBE32(rect + 4)) : 0,
+                rect ? int(LoadBE32(rect + 8)) : 0, rect ? int(LoadBE32(rect + 12)) : 0, tex, f1 & 0x3F,
+                f1 & 0xFFFFF000, (f2 & 0x1FFF) + 1, ((f2 >> 13) & 0x1FFF) + 1, LoadBE32(device + 0x2880),
+                LoadBE32(device + 0x2884));
+  }
+  __imp__sub_826D9588(ctx, base);
+}
+
+REX_HOOK_RAW(sub_826D6B98) {
+  // Clear(device, count, rects, flags, color, z, stencil): bit 0 of flags = color.
+  if (Enabled() && (ctx.r6.u32 & 1)) {
+    RaymanNativeRendererClear(g_rayman_membase + ctx.r3.u32 + native::kStateBegin, ctx.r7.u32);
+  }
+  if (std::getenv("RAYMAN_NATIVE_CAPTURE") && g_frame % 120 == 0) {
+    uint32_t device = ctx.r3.u32;
+    CAPTURE_LOG("clear count %u flags %X color %08X z %g surface %08X color %08X", ctx.r4.u32, ctx.r6.u32,
+                ctx.r7.u32, ctx.f1.f64, LoadBE32(device + 0x2880), LoadBE32(device + 0x2884));
+  }
+  __imp__sub_826D6B98(ctx, base);
 }
