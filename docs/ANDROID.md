@@ -82,7 +82,14 @@ Left idle, the game plays its pre-rendered attract video (`rolling_demo.wmv`), s
 
 <img src="media/android-s23-demo-video.jpg" alt="Attract-mode video playing on a Galaxy S23" width="480">
 
-Gameplay past "Press START" hasn't been tested yet. There are no touch controls, so use a Bluetooth controller. Graphics still go through the Xenos emulation, and performance hasn't been measured.
+Graphics still go through the Xenos emulation, and performance hasn't been measured.
+
+## Controls
+
+- **On-screen controller.** A floating stick on the left, placed where the thumb lands. A (jump, hold to glide), X (attack), B, Y and RT (run) on the right. Back and Start at the top. The overlay feeds an SDL3 virtual gamepad (`rex/src/android_touch.cpp`), so the game sees an ordinary Xbox 360 controller.
+- **Settings** (⚙ at the top right): show or hide the controls, opacity, size, and *fill the whole screen*. Fill stretches the 16:9 picture to the display's aspect ratio. True widescreen, showing more of the level, needs a patch to the game's camera and hasn't been done yet. The ⚙ button stays faintly visible when the controls are hidden.
+- **Physical controllers and keyboards** work through SDL, with the same keyboard bindings as desktop (`--mnk_mode`). Hide the on-screen controls when using one: hiding them also removes the virtual pad.
+- **Extra options:** one runtime option per line in `files/args.txt`.
 
 ## Next
 
