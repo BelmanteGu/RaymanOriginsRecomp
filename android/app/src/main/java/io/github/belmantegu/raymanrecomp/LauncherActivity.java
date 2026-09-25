@@ -67,9 +67,20 @@ public class LauncherActivity extends Activity {
         return TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics());
     }
 
+    /** Set when the home screen is opened on purpose (in-game settings), so it doesn't skip to the game. */
+    static final String EXTRA_HOME = "home";
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // With the game files in place the app icon goes straight to the game;
+        // the home screen is reached from the in-game settings (⚙ → Home screen).
+        if (!getIntent().getBooleanExtra(EXTRA_HOME, false) && gameReady()) {
+            extractShadersIfUpdated();
+            startActivity(new Intent(this, RaymanActivity.class));
+            finish();
+            return;
+        }
         FrameLayout root = new FrameLayout(this);
         root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
                 new int[] {0xFF0B3B2E, 0xFF12674F, 0xFF2BA37A}));
@@ -146,7 +157,7 @@ public class LauncherActivity extends Activity {
 
         setContentView(root);
         hideSystemBars(root);
-        new Thread(this::extractShaders).start();
+        new Thread(this::extractShadersIfUpdated).start();
         refresh();
     }
 
@@ -180,6 +191,7 @@ public class LauncherActivity extends Activity {
     private void startGame() {
         if (!gameReady() || busy) return;
         startActivity(new Intent(this, RaymanActivity.class));
+        finish();  // the app icon then goes back to the game, not to this screen
     }
 
     private void toggleGraphics() {
@@ -308,7 +320,20 @@ public class LauncherActivity extends Activity {
     }
 
     // SPIR-V shaders packed in a personal build (assets/spirv) go where the
-    // native renderer reads them.
+    // native renderer reads them: once per installed version of the APK.
+    private synchronized void extractShadersIfUpdated() {
+        long installed;
+        try {
+            installed = getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime;
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            installed = -1;
+        }
+        SharedPreferences prefs = getSharedPreferences("launcher", MODE_PRIVATE);
+        if (installed != -1 && prefs.getLong("shaders_from", 0) == installed) return;
+        extractShaders();
+        prefs.edit().putLong("shaders_from", installed).commit();
+    }
+
     private void extractShaders() {
         try {
             String[] names = getAssets().list("spirv");

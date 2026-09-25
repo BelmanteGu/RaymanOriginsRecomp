@@ -83,6 +83,9 @@ public class TouchControls extends View {
     // Pointer id -> what it is holding (a Button, or STICK).
     private final SparseArray<Object> pointers = new SparseArray<>();
     private static final Object STICK = new Object();
+    // A finger that lands away from every button (a resting thumb) stays inert
+    // until it is lifted: sliding onto a button doesn't press it.
+    private static final Object NOTHING = new Object();
     private float stickBaseX, stickBaseY, stickX, stickY, stickRadius;
     private boolean stickActive;
     private int stickPointer = -1;
@@ -209,6 +212,12 @@ public class TouchControls extends View {
         int index = e.getActionIndex();
 
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+            // A new gesture: nothing from a previous one (a lost "up") survives.
+            if (action == MotionEvent.ACTION_DOWN) {
+                pointers.clear();
+                stickPointer = -1;
+            }
+            pointers.remove(e.getPointerId(index));
             float x = e.getX(index), y = e.getY(index);
             Button hit = hitTest(x, y, null);
             if (hit != null && hit.id == BTN_SETTINGS) {
@@ -228,6 +237,8 @@ public class TouchControls extends View {
                 stickPointer = e.getPointerId(index);
                 stickBaseX = stickX = x;
                 stickBaseY = stickY = y;
+            } else if (hit == null) {
+                pointers.put(e.getPointerId(index), NOTHING);
             }
         }
         if (!visible) {
@@ -265,9 +276,25 @@ public class TouchControls extends View {
                 continue;
             }
             Object current = pointers.get(id);
+            if (current == NOTHING) {
+                next.put(id, NOTHING);
+                continue;
+            }
+            if (current == null) {
+                // Only fingers that just landed get here without an entry.
+                if (action != MotionEvent.ACTION_DOWN && action != MotionEvent.ACTION_POINTER_DOWN
+                        || id != e.getPointerId(index)) {
+                    next.put(id, NOTHING);
+                    continue;
+                }
+            }
             Button b = hitTest(x, y, current instanceof Button ? (Button) current : null);
+            // A finger may slide from one button straight onto a neighbour;
+            // once it is off every button it goes inert until lifted.
             if (b != null && b.id != BTN_SETTINGS) {
                 next.put(id, b);
+            } else {
+                next.put(id, NOTHING);
             }
         }
         if (!stickAlive) {
@@ -343,6 +370,12 @@ public class TouchControls extends View {
         if (stickActive && stickRadius > 0) {
             lx = (stickX - stickBaseX) / stickRadius;
             ly = (stickY - stickBaseY) / stickRadius;
+            // Radial dead zone: a resting thumb must not walk.
+            float len = (float) Math.hypot(lx, ly);
+            float dead = 0.18f;
+            float k = len <= dead ? 0 : (len - dead) / (1 - dead) / len;
+            lx *= k;
+            ly *= k;
         }
         nativeSetState(mask, lx, ly, rt ? 1f : 0f);
     }
