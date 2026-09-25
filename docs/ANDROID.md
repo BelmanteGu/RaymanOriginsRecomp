@@ -61,12 +61,20 @@ sh android/build_apk.sh          # android/app/build/outputs/apk/debug/app-debug
 ## 4. Install and copy your game
 
 ```sh
+G=/sdcard/Android/data/io.github.belmantegu.raymanrecomp/files/game
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
-adb shell mkdir -p /sdcard/Android/data/io.github.belmantegu.raymanrecomp/files/game
-adb push private/game/. /sdcard/Android/data/io.github.belmantegu.raymanrecomp/files/game/
+adb shell mkdir -p $G
+adb push private/game/. $G/
+# Folders created by adb belong to `shell` with mode 770, and the app process
+# can't traverse them. Open them up:
+adb shell "find $G -type d -exec chmod 777 {} +"
 ```
 
-The app reads `default.xex` and the bundles from that folder. Logs: `adb logcat -s SDL rex`.
+The app reads `default.xex` and the bundles from that folder. The runtime log is at `/sdcard/Android/data/io.github.belmantegu.raymanrecomp/files/rayman.log`. Crashes show up in `adb logcat -b crash`.
+
+## Status on a Galaxy S23 (Adreno 740, Android 16)
+
+The game boots: the native libraries load, the Vulkan device and swapchain come up at 2340×1080, the guest memory is mapped, audio opens at 6 channels / 48 kHz, and the Xenos emulation builds the game's pipelines with no errors in the log.
 
 ## Next
 

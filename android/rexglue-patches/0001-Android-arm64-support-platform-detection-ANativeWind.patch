@@ -1,8 +1,8 @@
 From b627b3becbca93b765f263b3d330d0ba8a8af3c1 Mon Sep 17 00:00:00 2001
 From: BelmanteGu <gustavobelmanteribeiro@gmail.com>
 Date: Fri, 25 Sep 2026 09:41:18 -0400
-Subject: [PATCH] Android (arm64) support: platform detection, ANativeWindow
- surface, SDL_main entry, AArch64 fibers, Bionic/libc++ shims
+Subject: [PATCH 1/2] Android (arm64) support: platform detection,
+ ANativeWindow surface, SDL_main entry, AArch64 fibers, Bionic/libc++ shims
 
 ---
  CMakeLists.txt                   | 13 ++++-
