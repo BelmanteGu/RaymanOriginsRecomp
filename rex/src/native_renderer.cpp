@@ -14,6 +14,9 @@
 #include <SDL3/SDL_metal.h>
 #include <SDL3/SDL_vulkan.h>
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -31,6 +34,7 @@
 #endif
 
 extern uint8_t* g_rayman_physbase;  // native_capture.cpp
+extern uint8_t* g_rayman_membase;   // hooks.cpp
 
 namespace {
 
@@ -147,6 +151,30 @@ void RaymanNativeRendererInit() {
     if (!g_rayman_physbase || uint64_t(address) + size > 0x20000000u) return nullptr;
     return g_rayman_physbase + address;
   });
+  if (const char* ws = std::getenv("RAYMAN_WIDESCREEN")) {
+    float aspect = std::string(ws) == "auto" ? float(w) / float(h) : float(std::atof(ws));
+    if (aspect > 16.0f / 9.0f + 0.01f && g_rayman_membase) {
+      // UbiArt fits its camera and screen rects to 16:9 with these two
+      // constants (sub_824C8798): 16/9 at 0x8201EF58 and 9/16 at 0x8201EF5C.
+      // They live in the image's read-only data, so the page is made writable
+      // for the store and read-only again afterwards.
+      auto store = [](uint32_t address, float v) {
+        uint32_t bits;
+        std::memcpy(&bits, &v, 4);
+        bits = __builtin_bswap32(bits);
+        uint8_t* host = g_rayman_membase + address;
+        uintptr_t page = uintptr_t(sysconf(_SC_PAGESIZE));
+        void* start = reinterpret_cast<void*>(uintptr_t(host) & ~(page - 1));
+        mprotect(start, page, PROT_READ | PROT_WRITE);
+        std::memcpy(host, &bits, 4);
+        mprotect(start, page, PROT_READ);
+      };
+      store(0x8201EF58, aspect);
+      store(0x8201EF5C, 1.0f / aspect);
+      renderer->SetAspect(aspect);
+      NATIVE_LOG("widescreen: aspect %.4f", aspect);
+    }
+  }
   g_renderer = renderer;
   NATIVE_LOG("native renderer ready (%dx%d), SPIR-V from %s", w, h, dir.c_str());
 }

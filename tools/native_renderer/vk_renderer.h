@@ -291,8 +291,9 @@ class Renderer {
     rb.pClearValues = &clear;
     vkCmdBeginRenderPass(cmd_, &rb, VK_SUBPASS_CONTENTS_INLINE);
     // The game renders 1280x720: letterbox it into the target.
-    float scale = std::min(extent_.width / 1280.0f, extent_.height / 720.0f);
-    float vw = 1280.0f * scale, vh = 720.0f * scale;
+    // Fit the game's frame (16:9, or wider with the widescreen patch) into the target.
+    float scale = std::min(extent_.width / (720.0f * aspect_), extent_.height / 720.0f);
+    float vw = 720.0f * aspect_ * scale, vh = 720.0f * scale;
     VkViewport viewport{(extent_.width - vw) / 2, (extent_.height - vh) / 2, vw, vh, 0, 1};
     VkRect2D scissor{{0, 0}, extent_};
     vkCmdSetViewport(cmd_, 0, 1, &viewport);
@@ -358,6 +359,9 @@ class Renderer {
     }
     return true;
   }
+
+  // Aspect ratio of the frames the game draws (width / height).
+  void SetAspect(float aspect) { aspect_ = aspect; }
 
   uint32_t width() const { return extent_.width; }
   uint32_t height() const { return extent_.height; }
@@ -968,6 +972,7 @@ class Renderer {
   }
 
   uint32_t width_ = 0, height_ = 0;
+  float aspect_ = 16.0f / 9.0f;
   VkExtent2D extent_{};
   bool ready_ = false;
   std::string error_;

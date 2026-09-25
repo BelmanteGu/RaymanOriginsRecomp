@@ -30,11 +30,21 @@ The output is derived from the game: it stays in `private/`.
 ## Run
 
 - **macOS:** `sh rex/run_native.sh`. Needs `librexgpu-null.dylib` next to the executable (ReXGlue built with the patches).
-- **Android:** the native renderer is the default (⚙ → *Native renderer*). Copy the shaders next to the game data:
-  ```sh
-  adb push private/native/spirv_ubo/. /sdcard/Android/data/io.github.belmantegu.raymanrecomp/files/spirv/
-  ```
+- **Android:** the native renderer is the default (launcher → *Graphics: Vulkan*). `android/build_apk.sh` packs the shaders from `private/native/spirv_ubo` into your local APK; the launcher extracts them on first run.
+
+### Widescreen
+
+`RAYMAN_WIDESCREEN=<aspect>` (or `auto` for the window's aspect) makes the game frame a wider scene instead of 16:9: it patches UbiArt's two 16:9 fit constants (16/9 at `0x8201EF58`, 9/16 at `0x8201EF5C`, used by `sub_824C8798`) and the renderer fits that aspect into the window. The guest video mode has to match, e.g. on macOS:
+
+```sh
+RAYMAN_WIDESCREEN=auto sh rex/run_native.sh --fullscreen=false --window_width=1560 --window_height=720 \
+    --video_mode_width=1560 --video_mode_height=720
+```
+
+<img src="media/native-widescreen-title.jpg" alt="Title screen framed at 19.5:9 by the native renderer" width="780">
+
+On Android it is on by default with the native renderer: the app sets a 720-line video mode with the display's aspect (19.5:9 on a Galaxy S23).
 
 ## Status
 
-The title screen and the gameplay captured so far render correctly. Diagnostics: the renderer logs skipped draws and their reason every 300 frames (`[native] skipped xN: ...`). Known gaps: render-to-texture passes, movies (to verify), and vertex formats not seen yet.
+The title screen and the gameplay captured so far render correctly. Diagnostics: the renderer logs skipped draws and their reason every 300 frames (`[native] skipped xN: ...`). Movies play (quad lists, 8-bit planes, textures refreshed when their content changes). Known gaps: render-to-texture passes and vertex formats not seen yet.

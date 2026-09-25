@@ -60,15 +60,12 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
         args.add(nativeRenderer(prefs) ? "--gpu_plugin=null" : "--gpu_plugin=xenos");
         // Physical keyboards map to the controller (same bindings as desktop).
         args.add("--mnk_mode=true");
-        if (prefs.getBoolean(TouchControls.KEY_FILL, false)) {
-            // Stretch to the whole screen: a 720p guest video mode with the
-            // display's aspect ratio. The game still frames a 16:9 scene, so the
-            // picture is stretched horizontally, not widened.
-            DisplayMetrics m = getResources().getDisplayMetrics();
-            int w = Math.max(m.widthPixels, m.heightPixels);
-            int h = Math.min(m.widthPixels, m.heightPixels);
-            int width = Math.round(720f * w / h / 8f) * 8;
-            args.add("--video_mode_width=" + width);
+        if (nativeRenderer(prefs) || prefs.getBoolean(TouchControls.KEY_FILL, false)) {
+            // A 720p guest video mode with the display's aspect ratio. With the
+            // native renderer the game frames a wider scene (RAYMAN_WIDESCREEN,
+            // set in onCreate); with the emulated GPU the 16:9 picture is
+            // stretched horizontally instead.
+            args.add("--video_mode_width=" + wideWidth());
             args.add("--video_mode_height=720");
         }
         File extra = new File(getExternalFilesDir(null), "args.txt");
@@ -95,6 +92,14 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
         return prefs.getBoolean(KEY_NATIVE, true);
     }
 
+    /** Width of a 720-line video mode with the display's aspect ratio. */
+    private int wideWidth() {
+        DisplayMetrics m = getResources().getDisplayMetrics();
+        int w = Math.max(m.widthPixels, m.heightPixels);
+        int h = Math.min(m.widthPixels, m.heightPixels);
+        return Math.round(720f * w / h / 8f) * 8;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         // Read by the native libraries (rex/src/native_renderer.cpp), so it has
@@ -104,6 +109,8 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
             if (nativeRenderer(prefs)) {
                 Os.setenv("RAYMAN_NATIVE_RENDER", "main", true);
                 Os.setenv("RAYMAN_NATIVE_SPIRV", new File(getExternalFilesDir(null), "spirv").getPath(), true);
+                // Native widescreen: the game frames the display's aspect ratio.
+                Os.setenv("RAYMAN_WIDESCREEN", String.valueOf(wideWidth() / 720f), true);
             } else {
                 Os.unsetenv("RAYMAN_NATIVE_RENDER");
             }
