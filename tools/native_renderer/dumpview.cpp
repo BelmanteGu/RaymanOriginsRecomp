@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-namespace {
+namespace dv {
 
 struct Draw {
   uint32_t entry, prim, a5, a6, a7, a8;
@@ -369,9 +369,11 @@ void RenderFrame(const Dump& dump, const char* out, std::map<uint32_t, std::vect
   std::printf("rendered %d draws (%d skipped) -> %s\n", drawn, skipped, out);
 }
 
-}  // namespace
+}  // namespace dv
 
+#ifndef DUMPVIEW_NO_MAIN
 int main(int argc, char** argv) {
+  using namespace dv;
   if (argc < 3) {
     std::fprintf(stderr, "usage: %s native_frame.bin outdir\n", argv[0]);
     return 1;
@@ -422,3 +424,4 @@ int main(int argc, char** argv) {
   RenderFrame(dump, (std::string(argv[2]) + "/frame_native.tga").c_str(), cache, textures);
   return 0;
 }
+#endif  // DUMPVIEW_NO_MAIN
