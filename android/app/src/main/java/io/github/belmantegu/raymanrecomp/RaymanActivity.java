@@ -1,7 +1,9 @@
 package io.github.belmantegu.raymanrecomp;
 
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.os.Bundle;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -197,7 +199,17 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
                 }
             })
             .setNegativeButton(android.R.string.cancel, null)
+            .setNeutralButton(R.string.home_screen, (dialog, which) ->
+                startActivity(new Intent(this, LauncherActivity.class)
+                    .putExtra(LauncherActivity.EXTRA_HOME, true)))
             .show();
+    }
+
+    // SDL asks for any orientation when it creates a resizable window (the
+    // user's rotation lock decides). The game is landscape only.
+    @Override
+    public void setOrientationBis(int w, int h, boolean resizable, String hint) {
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
     }
 
     private SeekBar addSlider(LinearLayout box, int label, int value, int max) {
