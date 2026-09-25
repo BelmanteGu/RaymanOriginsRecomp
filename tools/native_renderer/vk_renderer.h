@@ -5,9 +5,10 @@
 //
 // Input per draw: the D3D device state block (device + 0x480 .. + 0x3700, big
 // endian, see docs/D3D_MAP.md), the draw arguments, and guest physical memory.
-// Pipeline interface: XenosRecomp shader_common.h (SPIR-V flavour):
-//   push constants = 3 buffer addresses (VS constants, PS constants, shared)
-//   set 0 Texture2D heap, set 1 Texture3D heap, set 2 TextureCube heap, set 3 samplers.
+// Pipeline interface: XenosRecomp HLSL rewritten by hlsl_ubo.py (no 64-bit
+// addresses, so it runs on stock Adreno drivers without shaderInt64):
+//   set 0 Texture2D heap, set 1 Texture3D heap, set 2 TextureCube heap, set 3 samplers,
+//   set 4 uniform buffers: 0 VS constants, 1 PS constants, 2 shared constants.
 #pragma once
 
 #ifndef VK_NO_PROTOTYPES
@@ -48,7 +49,7 @@ class Renderer {
   };
   struct Recorded {
     VkPipeline pipeline;
-    VkDeviceAddress vsConst, psConst, shared;
+    uint32_t vsConst, psConst, shared;  // offsets into the constant buffer
     size_t vertexOffset, indexOffset;
     uint32_t indexCount;
     VkIndexType indexType;
@@ -85,10 +86,25 @@ class Renderer {
     if (!surface_ && !CreateOffscreen()) return false;
     stage("descriptors");
     if (!CreateDescriptors()) return false;
-    constants_ = CreateBuffer(64u << 20, 0);
+    constants_ = CreateBuffer(64u << 20, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
     vertices_ = CreateBuffer(64u << 20, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     indices_ = CreateBuffer(16u << 20, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
     staging_ = CreateBuffer(128u << 20, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    {
+      // Set 4: the three constant blocks, bound with per-draw dynamic offsets.
+      VkDescriptorBufferInfo infos[3] = {{constants_.buffer, 0, 4096}, {constants_.buffer, 0, 4096},
+                                         {constants_.buffer, 0, 512}};
+      VkWriteDescriptorSet w[3]{};
+      for (uint32_t i = 0; i < 3; ++i) {
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = sets_[4];
+        w[i].dstBinding = i;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        w[i].pBufferInfo = &infos[i];
+      }
+      vkUpdateDescriptorSets(device_, 3, w, 0, nullptr);
+    }
     VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     vkCreateFence(device_, &fi, nullptr, &fence_);
     VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -221,7 +237,7 @@ class Renderer {
       std::memcpy(shared + s * 4, &u, 4);
       std::memcpy(shared + 192 + s * 4, &samp, 4);
     }
-    r.shared = constants_.address + sharedAt;
+    r.shared = uint32_t(sharedAt);
   }
 
   // Submits the frame. Presents to the window, or reads back RGBA8 into `readback`.
@@ -256,8 +272,8 @@ class Renderer {
     vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 4, sets_, 0, nullptr);
     for (const Recorded& r : frameDraws_) {
       vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, r.pipeline);
-      uint64_t pc[3] = {r.vsConst, r.psConst, r.shared};
-      vkCmdPushConstants(cmd_, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 24, pc);
+      uint32_t offsets[3] = {r.vsConst, r.psConst, r.shared};
+      vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 4, 1, &sets_[4], 3, offsets);
       VkDeviceSize vo = r.vertexOffset;
       vkCmdBindVertexBuffers(cmd_, 0, 1, &vertices_.buffer, &vo);
       if (r.indexCount) {
@@ -407,17 +423,14 @@ class Renderer {
     }
     vkGetPhysicalDeviceFeatures2(phys_, &have);
     stage("device: features queried");
-    if (!have.features.shaderInt64 || !have12.bufferDeviceAddress || !have12.runtimeDescriptorArray ||
-        !have12.descriptorBindingPartiallyBound)
-      return Fail("GPU lacks int64 / buffer device address / descriptor indexing");
+    if (!have12.runtimeDescriptorArray || !have12.descriptorBindingPartiallyBound)
+      return Fail("GPU lacks descriptor indexing (runtimeDescriptorArray / partiallyBound)");
     VkPhysicalDeviceVulkan12Features want12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
-    want12.bufferDeviceAddress = VK_TRUE;
     want12.descriptorIndexing = have12.descriptorIndexing;
     want12.runtimeDescriptorArray = VK_TRUE;
     want12.descriptorBindingPartiallyBound = VK_TRUE;
     want12.shaderSampledImageArrayNonUniformIndexing = have12.shaderSampledImageArrayNonUniformIndexing;
     VkPhysicalDeviceFeatures2 want{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &want12};
-    want.features.shaderInt64 = VK_TRUE;
     float priority = 1.0f;
     VkDeviceQueueCreateInfo queue{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     queue.queueFamilyIndex = queueFamily_;
@@ -483,6 +496,11 @@ class Renderer {
     for (auto& f : formats)
       if (f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_R8G8B8A8_UNORM) { format = f; break; }
     extent_ = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent : VkExtent2D{width_, height_};
+    // Android reports a rotation from the panel's natural (portrait)
+    // orientation; the extent is already the window's (landscape). Render
+    // upright and let the compositor rotate: identity transform.
+    VkSurfaceTransformFlagBitsKHR transform = caps.currentTransform;
+    if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     VkSwapchainCreateInfoKHR sc{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};
     sc.surface = surface_;
     sc.minImageCount = std::max(2u, caps.minImageCount);
@@ -491,7 +509,7 @@ class Renderer {
     sc.imageExtent = extent_;
     sc.imageArrayLayers = 1;
     sc.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    sc.preTransform = caps.currentTransform;
+    sc.preTransform = transform;
     sc.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     sc.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     sc.clipped = VK_TRUE;
@@ -546,6 +564,19 @@ class Renderer {
   static constexpr uint32_t kMaxTextures = 1024, kMaxSamplers = 16;
 
   bool CreateDescriptors() {
+    {
+      VkDescriptorSetLayoutBinding ubo[3]{};
+      for (uint32_t i = 0; i < 3; ++i) {
+        ubo[i].binding = i;
+        ubo[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        ubo[i].descriptorCount = 1;
+        ubo[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+      }
+      VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+      li.bindingCount = 3;
+      li.pBindings = ubo;
+      if (vkCreateDescriptorSetLayout(device_, &li, nullptr, &setLayouts_[4]) != VK_SUCCESS) return Fail("set layout");
+    }
     for (int s = 0; s < 4; ++s) {
       VkDescriptorSetLayoutBinding b{};
       b.descriptorType = s == 3 ? VK_DESCRIPTOR_TYPE_SAMPLER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -560,23 +591,21 @@ class Renderer {
       li.pBindings = &b;
       if (vkCreateDescriptorSetLayout(device_, &li, nullptr, &setLayouts_[s]) != VK_SUCCESS) return Fail("set layout");
     }
-    VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 24};
     VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    pl.setLayoutCount = 4;
+    pl.setLayoutCount = 5;
     pl.pSetLayouts = setLayouts_;
-    pl.pushConstantRangeCount = 1;
-    pl.pPushConstantRanges = &push;
     if (vkCreatePipelineLayout(device_, &pl, nullptr, &pipelineLayout_) != VK_SUCCESS) return Fail("pipeline layout");
     VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures + 2},
-                                    {VK_DESCRIPTOR_TYPE_SAMPLER, kMaxSamplers}};
+                                    {VK_DESCRIPTOR_TYPE_SAMPLER, kMaxSamplers},
+                                    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3}};
     VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dp.maxSets = 4;
-    dp.poolSizeCount = 2;
+    dp.maxSets = 5;
+    dp.poolSizeCount = 3;
     dp.pPoolSizes = sizes;
     vkCreateDescriptorPool(device_, &dp, nullptr, &pool_);
     VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     da.descriptorPool = pool_;
-    da.descriptorSetCount = 4;
+    da.descriptorSetCount = 5;
     da.pSetLayouts = setLayouts_;
     if (vkAllocateDescriptorSets(device_, &da, sets_) != VK_SUCCESS) return Fail("descriptor sets");
     // Samplers: index = clampX * 3 + clampY over {wrap, mirror, clamp}.
@@ -616,22 +645,17 @@ class Renderer {
     b.size = size;
     VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     info.size = size;
-    info.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    info.usage = usage;
     vkCreateBuffer(device_, &info, nullptr, &b.buffer);
     VkMemoryRequirements req;
     vkGetBufferMemoryRequirements(device_, b.buffer, &req);
-    VkMemoryAllocateFlagsInfo flags{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
-    flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &flags};
+    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     alloc.allocationSize = req.size;
     alloc.memoryTypeIndex = FindMemory(req.memoryTypeBits,
                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     vkAllocateMemory(device_, &alloc, nullptr, &b.memory);
     vkBindBufferMemory(device_, b.buffer, b.memory, 0);
     vkMapMemory(device_, b.memory, 0, size, 0, reinterpret_cast<void**>(&b.map));
-    VkBufferDeviceAddressInfo addr{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
-    addr.buffer = b.buffer;
-    b.address = vkGetBufferDeviceAddress(device_, &addr);
     return b;
   }
 
@@ -701,13 +725,13 @@ class Renderer {
                          0, nullptr, 1, &b);
   }
 
-  VkDeviceAddress CopyConstants(const uint8_t* src) {
+  uint32_t CopyConstants(const uint8_t* src) {
     size_t at = constants_.Alloc(4096, 256);
     for (uint32_t i = 0; i < 4096; i += 4) {
       uint32_t w = xenos::BE32(src + i);
       std::memcpy(constants_.map + at + i, &w, 4);
     }
-    return constants_.address + at;
+    return uint32_t(at);
   }
 
   // Texture cache keyed by the fetch constant (address, format, size); decoded once.
@@ -887,10 +911,10 @@ class Renderer {
   Image offscreen_;
   VkFramebuffer offscreenFramebuffer_ = VK_NULL_HANDLE;
   Buffer readback_, constants_, vertices_, indices_, staging_;
-  VkDescriptorSetLayout setLayouts_[4]{};
+  VkDescriptorSetLayout setLayouts_[5]{};
   VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
   VkDescriptorPool pool_ = VK_NULL_HANDLE;
-  VkDescriptorSet sets_[4]{};
+  VkDescriptorSet sets_[5]{};
   VkFence fence_ = VK_NULL_HANDLE;
   VkSemaphore acquired_ = VK_NULL_HANDLE, rendered_ = VK_NULL_HANDLE;
   VkCommandBuffer cmd_ = VK_NULL_HANDLE, uploads_ = VK_NULL_HANDLE;

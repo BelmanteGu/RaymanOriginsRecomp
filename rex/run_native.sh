@@ -26,7 +26,7 @@ cd "$R"
 export VK_DRIVER_FILES="$SDK/share/vulkan/icd.d/MoltenVK_icd.json"
 export MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1
 export RAYMAN_NATIVE_RENDER=main
-export RAYMAN_NATIVE_SPIRV="${RAYMAN_NATIVE_SPIRV:-$P/private/native/shaders_by_hash}"
+export RAYMAN_NATIVE_SPIRV="${RAYMAN_NATIVE_SPIRV:-$P/private/native/spirv_ubo}"
 exec "$BUILD/rayman" \
     --game_data_root="$P/private/game" \
     --gpu_plugin=null \

@@ -42,7 +42,7 @@ bool Enabled() {
 
 std::string SpirvDir() {
   if (const char* dir = std::getenv("RAYMAN_NATIVE_SPIRV")) return dir;
-  return "../private/native/shaders_by_hash";
+  return "../private/native/spirv_ubo";
 }
 
 }  // namespace
