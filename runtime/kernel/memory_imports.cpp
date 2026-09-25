@@ -13,7 +13,9 @@
 // Faixas iguais às do Xenia: páginas de 4 KB, páginas de 64 KB e memória física.
 static PageHeap g_heap4k(0x00010000, 0x3FFF0000, 0x1000, 0x10000);
 static PageHeap g_heap64k(0x40000000, 0x3F000000, 0x10000, 0x10000);
-static PageHeap g_physical(0xA0000000, 0x60000000, 0x1000, 0x1000);
+// 512 MB, como o hardware: a GPU usa endereços físicos (addr & 0x1FFFFFFF), que
+// precisam corresponder a um único endereço aqui (físico + 0xA0000000).
+static PageHeap g_physical(0xA0000000, 0x20000000, 0x1000, 0x1000);
 
 static PageHeap* LookupVirtualHeap(uint32_t address)
 {

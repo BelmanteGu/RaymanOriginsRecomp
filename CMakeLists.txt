@@ -62,6 +62,7 @@ add_executable(rayman
     runtime/kernel/xam_imports.cpp
     runtime/kernel/net_imports.cpp
     runtime/kernel/video_imports.cpp
+    runtime/gpu/command_processor.cpp
     thirdparty/o1heap/o1heap/o1heap.c
     ${IMPORT_STUBS}
 )
