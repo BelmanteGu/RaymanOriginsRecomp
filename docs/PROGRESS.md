@@ -4,6 +4,8 @@ Technical notes on how Rayman Origins (Xbox 360) went from a raw `default.xex` t
 
 ## Where things stand
 
+**Update: the title screen renders.** See section 5.
+
 The recompiled game boots, initializes its engine, loads its UbiArt bundles, starts about 20 threads and submits frames to a GPU command processor at 1280×720 without crashing. Nothing is drawn yet: the GPU backend executes synchronization packets only.
 
 | Milestone | Result |
@@ -83,9 +85,22 @@ A PM4 command processor thread consumes the ring buffer written by the game's Di
 2. **Scratch registers** (`SCRATCH_REG0..7`) are mirrored to `SCRATCH_ADDR + n*4` when enabled in `SCRATCH_UMSK`. Direct3D synchronizes through them.
 3. **Command-stream interrupts are dispatched once per CPU in the mask, as that CPU.** The handler reads the current CPU from `PCR+0x10C` and acknowledges by clearing that CPU's bit.
 
+
+## 5. ReXGlue: the title screen
+
+[ReXGlue](https://github.com/rexglue/rexglue-sdk) (BSD-3-Clause) is an Xbox 360 recompilation SDK whose runtime is Xenia's kernel, Vulkan GPU and XMA audio, with an ahead-of-time codegen in the spirit of XenonRecomp. It ships macOS ARM64 builds (Vulkan through MoltenVK).
+
+Its codegen needed exactly what `tools/jumptables` already knew about this game:
+
+- The first run stopped on `Call to invalid or unregistered function at guest address 0x8297D9E8`, a function reached only through a pointer. Our list had it.
+- ReXGlue rejects overlapping functions, which exposed a flaw in our sizing: a function containing a switch ran up to the next *structural* start and swallowed vtable methods behind it. Sizes now come from a single walk that knows every start (including pointer-reached ones), treats a branch to a known start as a tail call, and ignores pointer candidates between a switch and its cases. Result: 16 switch functions, 50 `bdz` functions, 5807 pointer-reached functions, 173 jump tables, zero conflicts.
+- The GPU is a plugin (`--gpu_plugin=xenos`, `librexgpu-xenos.dylib` next to the executable) and the Vulkan loader must be pointed at MoltenVK's ICD (`VK_DRIVER_FILES`). `rex/run.sh` does both.
+
+On an Apple M1 the game shows the UbiArt logo, then the Rayman Origins title screen ("Press START"), with audio from the Mac speakers. `RAYMAN_CAPTURE=1` saves the guest frame every 10 seconds, to verify rendering without access to the window.
+
 ## Next steps
 
-- Draw: translate Xenos state and shaders to Vulkan and show the front buffer (#12, #13).
-- Audio (#14), input through SDL (#15), movies (#16).
+- Play past the title screen and check levels, movies (#16) and saves.
+- Performance and correctness on MoltenVK.
 - Validate the ported VMX instructions against Xenia's PPC tests (#4).
 - Android (#17).
