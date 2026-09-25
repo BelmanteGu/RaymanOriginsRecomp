@@ -74,11 +74,15 @@ The app reads `default.xex` and the bundles from that folder. The runtime log is
 
 ## Status on a Galaxy S23 (Adreno 740, Android 16)
 
-**The game runs and renders.** The native libraries load, the Vulkan device and swapchain come up at 2340×1080, the guest memory is mapped, audio opens at 6 channels / 48 kHz, and the game reaches gameplay. The screenshot below is the attract-mode demo in Gourmand Land, captured with `adb exec-out screencap`:
+**The title screen renders.** The native libraries load, the Vulkan device and swapchain come up at 2340×1080, the guest memory is mapped, and audio opens at 6 channels / 48 kHz. The game shows the Ubisoft logo, then the title screen rendered in real time (captured with `adb exec-out screencap`):
 
-![Rayman Origins running on a Galaxy S23](media/android-s23-first-boot.jpg)
+![Rayman Origins title screen on a Galaxy S23](media/android-s23-title.jpg)
 
-Graphics still go through the Xenos emulation. Performance hasn't been measured, and there are no touch controls yet (use a Bluetooth controller).
+Left idle, the game plays its pre-rendered attract video (`rolling_demo.wmv`), so movie playback works too:
+
+<img src="media/android-s23-demo-video.jpg" alt="Attract-mode video playing on a Galaxy S23" width="480">
+
+Gameplay past "Press START" hasn't been tested yet. There are no touch controls, so use a Bluetooth controller. Graphics still go through the Xenos emulation, and performance hasn't been measured.
 
 ## Next
 
