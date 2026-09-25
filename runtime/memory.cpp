@@ -4,6 +4,12 @@
 
 GuestMemory g_memory;
 
+// Usado pelo xpointer<T> da XenonUtils para traduzir ponteiros do guest.
+extern "C" void* MmGetHostAddress(uint32_t ptr)
+{
+    return g_memory.base + ptr;
+}
+
 bool GuestMemory::Init()
 {
     // Tenta um endereço alinhado a 4 GB (como o Unleashed); senão, qualquer lugar.

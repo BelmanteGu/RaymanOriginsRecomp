@@ -10,7 +10,11 @@ The fork also contains instruction implementations adapted from https://github.c
 
 ## Xenia — BSD-3-Clause
 
-The Xenos half-float conversion helpers (`ppc_float_to_xenos_half`, `ppc_xenos_half_to_float` in the XenonRecomp fork) and the semantics of `vcmpbfp`, `vpkd3d128` and `vupkd3d128` are adapted from Xenia (https://github.com/xenia-canary/xenia-canary).
+Adapted from Xenia (https://github.com/xenia-canary/xenia-canary):
+
+- The Xenos half-float conversion helpers (`ppc_float_to_xenos_half`, `ppc_xenos_half_to_float` in the XenonRecomp fork) and the semantics of `vcmpbfp`, `vpkd3d128` and `vupkd3d128`.
+- The printf-style formatter in `runtime/kernel/guest_printf_core.inl` (from `xboxkrnl_strings.{h,cc}`).
+- The semantics of the memory, synchronization and file system kernel imports.
 
 ```
 Copyright (c) 2015, Ben Vanik.

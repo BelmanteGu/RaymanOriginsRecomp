@@ -50,6 +50,11 @@ add_executable(rayman
     runtime/kernel/heap.cpp
     runtime/kernel/page_heap.cpp
     runtime/kernel/memory_imports.cpp
+    runtime/kernel/objects.cpp
+    runtime/kernel/thread.cpp
+    runtime/kernel/sync_imports.cpp
+    runtime/kernel/system_imports.cpp
+    runtime/kernel/guest_printf.cpp
     thirdparty/o1heap/o1heap/o1heap.c
     ${IMPORT_STUBS}
 )
