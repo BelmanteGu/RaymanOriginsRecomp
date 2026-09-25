@@ -30,3 +30,11 @@ tools/patches/
 build-bisect/
 recomp/ppc-bisect/
 recomp/bisect-config/
+tools/moltenvk/
+tools/forks/xenia-src/
+rex/assets
+rex/generated/default/
+rex/out/
+rex/build/
+rex/captures/
+rex/*.log
