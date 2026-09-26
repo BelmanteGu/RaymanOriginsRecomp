@@ -103,7 +103,7 @@ The Galaxy A56 (Exynos 1580) has no Adreno GPU: its Samsung **Xclipse 540** is b
 
 - **On-screen controller.** A floating stick on the left, placed where the thumb lands. A (jump, hold to glide), X (attack), B, Y and RT (run) on the right. Back and Start at the top. The overlay feeds an SDL3 virtual gamepad (`rex/src/android_touch.cpp`), so the game sees an ordinary Xbox 360 controller.
 - **Settings** (⚙ at the top right): show or hide the controls, opacity, size, the native renderer, and *fill the whole screen* (only for the emulated GPU: it stretches the 16:9 picture; the native renderer shows true widescreen). **Home screen** opens the launcher (game files, saves, graphics). The ⚙ button stays faintly visible when the controls are hidden.
-- **Starting:** once the game files are in place, the app icon goes straight into the game. The game is landscape only.
+- **Starting:** the app opens on the home screen ([PORT_HOME.md](PORT_HOME.md)): Play, Options (resolution, graphics, touch controls, imports), Game files (import your game pack) and Quit, driven by touch or a controller. The game is landscape only.
 - **Touch behaviour:** a button presses only when a finger lands on it (or slides onto it from another button); a thumb resting between buttons stays inert. The stick has a small dead zone.
 - **Physical controllers and keyboards** work through SDL, with the same keyboard bindings as desktop (`--mnk_mode`). Hide the on-screen controls when using one: hiding them also removes the virtual pad.
 - **Extra options:** one runtime option per line in `files/args.txt`.

@@ -145,7 +145,7 @@ The game thread's CPU profile in a level (~130 draws per frame) had the renderer
 
 **Fix.** Two frames in flight. Each frame has its own vertex, index, constant and staging buffers, command buffers, fence, semaphores, texture heap set and constant set. `BeginFrame` only waits for the frame that used those resources last, two frames ago.
 
-**Result.** On the Galaxy A56 the GPU wait drops to **0.0 ms**: when a frame starts, the frame that used its resources has always finished.
+**Result.** On the Galaxy A56 (Xclipse) and on the Galaxy S23 (Adreno 740) the GPU wait drops to **0.0 ms**: when a frame starts, the frame that used its resources has always finished.
 
 A new texture heap slot is written to the current frame's set right away, and to the other frame's set when that frame comes around. A descriptor set that a pending command buffer may read is never written, and no update-after-bind is needed (the Adreno 610 has none). Per-frame buffers are sized for what a frame uses now that only the used vertices and constants are copied: ~96 MB per frame, 192 MB in total, against 272 MB before for a single frame.
 
@@ -160,6 +160,8 @@ A new texture heap slot is written to the current frame's set right away, and to
 Up to this pass the port had only run on Snapdragon phones (Adreno GPUs). The Galaxy A56 is an Exynos phone: its GPU, the Samsung Xclipse 540, is based on AMD's RDNA architecture, with Samsung's own Vulkan driver (1.3.279, driver 24.0.560). It is a mid-range phone, well below the S23.
 
 With all the fixes above and nothing specific to it, the game **runs very well** there: the first level at **60 fps**, with the correct picture (widescreen, touch controls).
+
+<img src="media/android-a56-gameplay.jpg" alt="The first level on a Galaxy A56 (Xclipse 540)" width="780">
 
 | Galaxy A56, in a level (~120 draws per frame) | |
 |---|---|

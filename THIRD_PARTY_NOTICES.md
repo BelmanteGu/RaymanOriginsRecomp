@@ -61,3 +61,7 @@ The runtime layout (guest thread block, memory reservation) follows https://gith
 ## ReXGlue — BSD-3-Clause
 
 `android/rexglue-patches/` contains patches against ReXGlue (https://github.com/rexglue/rexglue-sdk), which is BSD-3-Clause licensed and derived from Xenia. The patches are distributed under the same terms.
+
+## Titan One, Barlow Semi Condensed — SIL Open Font License 1.1
+
+The launcher's fonts in `android/app/src/main/res/font/`: Titan One, Copyright (c) 2011 Rodrigo Fuenzalida, with Reserved Font Name Titan; Barlow Semi Condensed, Copyright 2017 The Barlow Project Authors. Both from Google Fonts (https://github.com/google/fonts), licensed under the SIL Open Font License 1.1; the full texts are in `android/licenses/`.
