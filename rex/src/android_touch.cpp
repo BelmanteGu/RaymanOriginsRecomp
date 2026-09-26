@@ -16,14 +16,18 @@ namespace {
 std::mutex g_mutex;
 SDL_Joystick* g_pad = nullptr;
 std::atomic<bool> g_enabled{false};
+std::atomic<bool> g_gameRunning{false};  // set once the game presents a frame
 
 // Must hold g_mutex. The joystick subsystem is started by the runtime's input
-// driver, so the pad is attached lazily once it is up.
+// driver, so the pad is attached lazily once it is up. Attaching raises an SDL
+// event that the input driver handles, so wait for the game's first frame:
+// before it (and when the runtime failed to start and tore the driver down)
+// the handler may not exist any more.
 bool EnsurePad() {
   if (g_pad) {
     return true;
   }
-  if (!SDL_WasInit(SDL_INIT_JOYSTICK)) {
+  if (!g_gameRunning || !SDL_WasInit(SDL_INIT_JOYSTICK)) {
     return false;
   }
   SDL_VirtualJoystickDesc desc;
@@ -59,6 +63,11 @@ Sint16 ToAxis(float value) {
 
 }  // namespace
 
+// Present hook (hooks.cpp), every frame.
+void RaymanTouchGameRunning() {
+  g_gameRunning.store(true, std::memory_order_relaxed);
+}
+
 extern "C" {
 
 // Attached while the overlay is visible, so a physical controller is the only
@@ -90,8 +99,16 @@ JNIEXPORT void JNICALL Java_io_github_belmantegu_raymanrecomp_TouchControls_nati
   float t = std::clamp(right_trigger, 0.0f, 1.0f);
   SDL_SetJoystickVirtualAxis(g_pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER,
                              Sint16(SDL_JOYSTICK_AXIS_MIN + t * (SDL_JOYSTICK_AXIS_MAX - SDL_JOYSTICK_AXIS_MIN)));
+  // A virtual pad's new state becomes gamepad events in SDL_UpdateJoysticks,
+  // on the main thread's next event pump. That thread sleeps in SDL_WaitEvent
+  // until an event arrives, so wake it with an empty user event.
+  SDL_Event wake{};
+  wake.type = SDL_EVENT_USER;
+  SDL_PushEvent(&wake);
 }
 
 }  // extern "C"
 
+#else
+void RaymanTouchGameRunning() {}
 #endif  // __ANDROID__

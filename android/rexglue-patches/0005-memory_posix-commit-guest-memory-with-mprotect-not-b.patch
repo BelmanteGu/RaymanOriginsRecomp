@@ -1,0 +1,96 @@
+From d5ea3b27670ff5428701a3adbcf958e5559a5550 Mon Sep 17 00:00:00 2001
+From: Gustavo Belmante <gustavobelmanteribeiro@gmail.com>
+Date: Fri, 25 Sep 2026 20:33:05 -0400
+Subject: [PATCH 5/6] memory_posix: commit guest memory with mprotect, not by
+ parsing /proc/self/maps
+
+The guest address space is reserved up front, so every commit hit the MAP_FIXED_NOREPLACE EEXIST path, which walked /proc/self/maps (thousands of lines, generated with the mmap lock held) before an mprotect that already fails with ENOMEM unless the whole range is mapped. On Android this ran on every guest allocation and stalled loading (world map, level changes). Commit on an existing reservation now tries mprotect first.
+---
+ src/core/memory_posix.cpp | 57 ++++++++++++++-------------------------
+ 1 file changed, 20 insertions(+), 37 deletions(-)
+
+diff --git a/src/core/memory_posix.cpp b/src/core/memory_posix.cpp
+index 2cdcd55..dd59322 100644
+--- a/src/core/memory_posix.cpp
++++ b/src/core/memory_posix.cpp
+@@ -188,38 +188,6 @@ static bool FindEntryForAddress(void* address, LinuxMapEntry& out_entry) {
+   return false;
+ }
+ 
+-// Check if [base, base+length) is fully covered by existing mappings (no gaps)
+-static bool IsRangeFullyMapped(void* base_address, size_t length) {
+-  if (!base_address || length == 0)
+-    return false;
+-
+-  const uintptr_t begin = reinterpret_cast<uintptr_t>(base_address);
+-  const uintptr_t end = begin + length;
+-  if (end < begin) {  // overflow check
+-    return false;
+-  }
+-
+-  std::ifstream maps("/proc/self/maps");
+-  if (!maps.is_open())
+-    return false;
+-
+-  uintptr_t cursor = begin;
+-  std::string line;
+-  while (std::getline(maps, line)) {
+-    LinuxMapEntry e;
+-    if (!ParseProcMapsLine(line, e))
+-      continue;
+-    if (e.end <= cursor)
+-      continue;
+-    if (e.start > cursor)
+-      return false;  // gap found
+-    cursor = e.end;
+-    if (cursor >= end)
+-      return true;
+-  }
+-  return cursor >= end;
+-}
+-
+ // Convert /proc/self/maps permission chars to PageAccess
+ static PageAccess PermsToPageAccess(const char perms[5]) {
+   const bool r = perms[0] == 'r';
+@@ -275,6 +243,22 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
+   }
+ #endif
+ 
++#if REX_PLATFORM_LINUX
++  // Commit on an existing reservation (the common case: the guest address
++  // space is reserved up front): mprotect straight away. It fails with ENOMEM
++  // unless every page of the range is mapped, which is the check the EEXIST
++  // path below makes by parsing /proc/self/maps - thousands of lines, read
++  // with the process's mmap lock held, on every guest allocation.
++  if (base_address != nullptr && allocation_type == AllocationType::kCommit) {
++    const size_t host_page = page_size();
++    const uintptr_t address = reinterpret_cast<uintptr_t>(base_address);
++    if ((address % host_page) == 0 && (length % host_page) == 0 &&
++        mprotect(base_address, length, static_cast<int>(prot_requested)) == 0) {
++      return base_address;
++    }
++  }
++#endif
++
+   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+ #if REX_PLATFORM_MAC
+   if (access == PageAccess::kExecuteReadWrite || access == PageAccess::kExecuteReadOnly) {
+@@ -303,11 +287,10 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
+   if (errno == EEXIST && base_address &&
+       (allocation_type == AllocationType::kCommit ||
+        allocation_type == AllocationType::kReserveCommit)) {
+-    // Verify the entire range is mapped before using mprotect
+-    if (IsRangeFullyMapped(base_address, length)) {
+-      if (mprotect(base_address, length, static_cast<int>(prot_requested)) == 0) {
+-        return base_address;
+-      }
++    // mprotect fails (ENOMEM) unless the entire range is mapped, so it is its
++    // own check; no need to walk /proc/self/maps first.
++    if (mprotect(base_address, length, static_cast<int>(prot_requested)) == 0) {
++      return base_address;
+     }
+   }
+ #endif
+-- 
+2.47.1.windows.1
+

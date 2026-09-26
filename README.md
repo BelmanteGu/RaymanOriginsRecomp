@@ -13,6 +13,10 @@ An unofficial effort to statically recompile the Xbox 360 version of **Rayman Or
 
 <table>
   <tr>
+    <td align="center"><img src="docs/media/android-s23-home.jpg" alt="The app's home screen: the game's logo, a wooden-plank menu (Play, Options, Game files, Quit) and the game files' status, over the intro's great-tree shot" width="400"><br><em>Home screen</em></td>
+    <td align="center"><img src="docs/media/android-s23-home-options.jpg" alt="Options on the home screen: resolution, graphics, touch controls, opacity, imports" width="400"><br><em>Options: render resolution, graphics, touch controls</em></td>
+  </tr>
+  <tr>
     <td align="center"><img src="docs/media/android-s23-native-combat.jpg" alt="Combat in widescreen on a Galaxy S23" width="400"><br><em>Gameplay</em></td>
     <td align="center"><img src="docs/media/android-s23-native-map.jpg" alt="World map on a Galaxy S23" width="400"><br><em>World map</em></td>
   </tr>
@@ -34,14 +38,16 @@ An unofficial effort to statically recompile the Xbox 360 version of **Rayman Or
 | 4 | Graphics, audio, input | ✅ Via [ReXGlue](https://github.com/rexglue/rexglue-sdk) (Vulkan/MoltenVK), GPU emulated |
 | 5 | Android (NDK, Vulkan, touch/gamepad) | ✅ Runs on a Galaxy S23: [docs/ANDROID.md](docs/ANDROID.md) |
 | 6 | Native renderer (no GPU emulation) | ✅ Done: 60 fps on a Galaxy S23, true widescreen, movies. [docs/NATIVE_RENDERER.md](docs/NATIVE_RENDERER.md) |
+| 7 | Performance and more phones | ✅ Levels at 60 fps at full resolution on the S23 (were 43–46), 60 fps on a Galaxy A56 (Exynos, Xclipse GPU), plain Vulkan 1.1 support. [docs/ANDROID_PERFORMANCE.md](docs/ANDROID_PERFORMANCE.md) |
 
 ## Roadmap
 
 1. ~~**Native renderer.**~~ ✅ Done: the game's draws go straight to Vulkan, with shaders converted ahead of time by XenosRecomp.
 2. ~~**True widescreen.**~~ ✅ Done: a 19.5:9 phone shows more of the level instead of stretching.
 3. **Native renderer gaps.** Render-to-texture passes and vertex formats not seen yet.
-4. **Performance on phones.** Measure and tune on the Galaxy S23.
-5. **Polish.** Optional Turnip driver for Adreno, an in-app game folder picker, and suspend/resume.
+4. ~~**Performance on phones.**~~ ✅ Done: profiled and fixed on the Galaxy S23, runs on Exynos (Galaxy A56), Vulkan 1.1 path for Adreno 6xx.
+5. ~~**Home screen and game import.**~~ ✅ Done: a home screen in the game's own style ([docs/PORT_HOME.md](docs/PORT_HOME.md)) and one-file game pack import.
+6. **Low-end phones.** Run on the Redmi 10C (Adreno 610, Vulkan 1.1); texture decoding off the game thread.
 
 Technical write-up of every step, including the bugs found along the way: [docs/PROGRESS.md](docs/PROGRESS.md).
 

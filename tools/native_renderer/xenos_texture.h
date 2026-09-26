@@ -116,8 +116,14 @@ inline bool Supported(uint32_t format) {
   return format == 0x12 || format == 0x13 || format == 0x14 || format == 0x06 || format == 0x02;
 }
 
-// Decodes the top mip of a 2D texture to RGBA8 (width*height*4 bytes).
-inline bool DecodeTexture(const MemoryReader& memory, const TextureFetch& t, std::vector<uint8_t>& rgba) {
+// Bytes per texel of the decoded image: k_8 stays one channel (R8, sampled
+// through an RRRR swizzle), everything else becomes RGBA8.
+inline uint32_t DecodedBytesPerTexel(uint32_t format) { return format == 0x02 ? 1 : 4; }
+inline size_t DecodedSize(const TextureFetch& t) { return size_t(t.width) * t.height * DecodedBytesPerTexel(t.format); }
+
+// Decodes the top mip of a 2D texture into `out` (DecodedSize bytes, tightly
+// packed rows; R8 for k_8, RGBA8 otherwise).
+inline bool DecodeTextureTo(const MemoryReader& memory, const TextureFetch& t, uint8_t* out) {
   bool block = t.format == 0x12 || t.format == 0x13 || t.format == 0x14;
   uint32_t blockBytes = t.format == 0x12 ? 8 : block ? 16 : t.format == 0x06 ? 4 : t.format == 0x02 ? 1 : 0;
   if (!blockBytes) return false;
@@ -129,33 +135,57 @@ inline bool DecodeTexture(const MemoryReader& memory, const TextureFetch& t, std
     PackedBaseOffset(t.width, t.height, ox, oy);
     if (block) { ox /= 4; oy /= 4; }
   }
-  uint32_t span = 0;
-  for (uint32_t by = 0; by < bh; ++by)
-    for (uint32_t bx = 0; bx < bw; ++bx) {
-      uint32_t off = t.tiled ? uint32_t(GetTiledOffset2D(bx + ox, by + oy, pitch, log2)) : (by * pitch + bx) * blockBytes;
-      span = std::max(span, off + blockBytes);
-    }
+  // Bytes the level spans: tiled surfaces are laid out in 32x32-block macro
+  // tiles over the 32-aligned pitch, so this bounds every offset.
+  uint32_t span = t.tiled ? ((pitch + 31) & ~31u) * ((bh + oy + 31) & ~31u) * blockBytes
+                          : ((bh - 1) * pitch + bw) * blockBytes;
   const uint8_t* src = memory(t.base, span);
   if (!src) return false;
-  rgba.assign(size_t(t.width) * t.height * 4, 0);
+  // Within a run of 8 blocks in x (x & ~7 fixed), the tiled offset is the
+  // run's offset plus a delta that depends on x & 7 only: the address bits x
+  // feeds there don't overlap the ones y feeds.
+  int32_t delta[8];
+  for (int32_t i = 0; i < 8; ++i) delta[i] = GetTiledOffset2D(i, 0, pitch, log2) - GetTiledOffset2D(0, 0, pitch, log2);
+  const uint32_t outBpp = DecodedBytesPerTexel(t.format);
+  // k_8 tiled: the 8 texels of a run are 8 contiguous bytes (delta 0..7), so
+  // whole runs are copied at once and byte-swapped within their 32-bit groups
+  // (movie planes, rewritten every frame).
+  bool contiguous8 = blockBytes == 1 && t.tiled;
+  for (int32_t i = 0; contiguous8 && i < 8; ++i) contiguous8 = delta[i] == i;
   for (uint32_t by = 0; by < bh; ++by) {
+    uint32_t y = by + oy;
+    int32_t runBase = 0;
     for (uint32_t bx = 0; bx < bw; ++bx) {
-      uint32_t off = t.tiled ? uint32_t(GetTiledOffset2D(bx + ox, by + oy, pitch, log2)) : (by * pitch + bx) * blockBytes;
-      uint8_t blk[16];
-      std::memcpy(blk, src + off, blockBytes);
+      uint32_t x = bx + ox;
+      if (contiguous8 && (x & 7) == 0 && bx + 8 <= bw) {
+        const uint8_t* s = src + GetTiledOffset2D(int32_t(x), int32_t(y), pitch, 0);
+        uint8_t* o = &out[size_t(by) * t.width + bx];
+        static constexpr uint8_t kLane[4][4] = {{0, 1, 2, 3}, {1, 0, 3, 2}, {3, 2, 1, 0}, {0, 1, 2, 3}};
+        const uint8_t* lane = kLane[t.endian];  // same lane mapping as the per-texel path below
+        for (int i = 0; i < 8; ++i) o[i] = s[(i & ~3) + lane[i & 3]];
+        bx += 7;
+        continue;
+      }
+      uint32_t off;
+      if (t.tiled) {
+        if (bx == 0 || (x & 7) == 0) runBase = GetTiledOffset2D(int32_t(x & ~7u), int32_t(y), pitch, log2);
+        off = uint32_t(runBase + delta[x & 7]);
+      } else {
+        off = (by * pitch + bx) * blockBytes;
+      }
       if (blockBytes == 1) {
         // k_8: one channel. The endian swap works on 32-bit groups, so read the
         // byte from its swapped position within the group.
         uint32_t lane = off & 3, swapped = t.endian == 2 ? 3 - lane : t.endian == 1 ? lane ^ 1 : lane;
-        uint8_t v = src[(off & ~3u) + swapped];
-        uint8_t* o = &rgba[(size_t(by) * t.width + bx) * 4];
-        o[0] = o[1] = o[2] = o[3] = v;
+        out[size_t(by) * t.width + bx] = src[(off & ~3u) + swapped];
         continue;
       }
+      uint8_t blk[16];
+      std::memcpy(blk, src + off, blockBytes);
       Swap(blk, blockBytes, t.endian);
       if (!block) {
         // D3DFMT_A8R8G8B8 on k_8_8_8_8: after the 8in32 swap the bytes are B G R A.
-        uint8_t* o = &rgba[(size_t(by) * t.width + bx) * 4];
+        uint8_t* o = &out[(size_t(by) * t.width + bx) * 4];
         o[0] = blk[2]; o[1] = blk[1]; o[2] = blk[0]; o[3] = blk[3];
         continue;
       }
@@ -171,11 +201,25 @@ inline bool DecodeTexture(const MemoryReader& memory, const TextureFetch& t, std
         }
       }
       for (int i = 0; i < 16; ++i) {
-        uint32_t x = bx * 4 + (i & 3), y = by * 4 + i / 4;
-        if (x < t.width && y < t.height) std::memcpy(&rgba[(size_t(y) * t.width + x) * 4], px[i], 4);
+        uint32_t px_x = bx * 4 + (i & 3), px_y = by * 4 + i / 4;
+        if (px_x < t.width && px_y < t.height) std::memcpy(&out[(size_t(px_y) * t.width + px_x) * outBpp], px[i], 4);
       }
     }
   }
+  return true;
+}
+
+// Decodes the top mip to RGBA8 (width*height*4 bytes); k_8 is replicated to
+// all four channels. For the offline tools.
+inline bool DecodeTexture(const MemoryReader& memory, const TextureFetch& t, std::vector<uint8_t>& rgba) {
+  std::vector<uint8_t> decoded(DecodedSize(t));
+  if (!DecodeTextureTo(memory, t, decoded.data())) return false;
+  if (DecodedBytesPerTexel(t.format) == 4) {
+    rgba = std::move(decoded);
+    return true;
+  }
+  rgba.resize(decoded.size() * 4);
+  for (size_t i = 0; i < decoded.size(); ++i) rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = rgba[i * 4 + 3] = decoded[i];
   return true;
 }
 

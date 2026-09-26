@@ -8,4 +8,5 @@
     <string name="restart_needed">Feche e abra o app de novo para aplicar a configuração de tela.</string>
     <string name="native_renderer">Renderizador nativo (sem emulação de GPU)</string>
     <string name="home_screen">Tela inicial</string>
+    <string name="render_scale">Resolução</string>
 </resources>

@@ -9,4 +9,5 @@
     <string name="restart_needed">Close and reopen the app to apply the screen setting.</string>
     <string name="native_renderer">Native renderer (no GPU emulation)</string>
     <string name="home_screen">Home screen</string>
+    <string name="render_scale">Resolution</string>
 </resources>

@@ -17,6 +17,8 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -47,6 +49,32 @@ void* g_nativeWindow = nullptr;  // the ANativeWindow the surface was made from
 #endif
 bool g_frameOpen = false;
 std::mutex g_mutex;
+// The app is in the background (lock screen, notification shade, another app).
+// Android keeps the window alive in some of these cases, so the game would go
+// on rendering unseen and heat the phone up.
+std::atomic<bool> g_background{false};
+
+// Render scale (fraction of the screen size the game is drawn at, stretched to
+// the screen): RAYMAN_RENDER_SCALE at start, then live from the app settings.
+std::atomic<float> g_renderScale{[] {
+  const char* v = std::getenv("RAYMAN_RENDER_SCALE");
+  float s = v ? float(std::atof(v)) : 1.0f;
+  return s > 0 ? s : 1.0f;
+}()};
+
+bool OnAppEvent(void*, SDL_Event* event) {
+  if (event->type == SDL_EVENT_WILL_ENTER_BACKGROUND) g_background = true;
+  if (event->type == SDL_EVENT_DID_ENTER_FOREGROUND) g_background = false;
+  return true;
+}
+double g_drawMs = 0;  // this frame: time in the draw hooks (vertex/constant copies, texture decode, pipelines)
+std::chrono::steady_clock::time_point g_lastPresent = std::chrono::steady_clock::now();
+
+struct ScopedTimer {
+  double& total;
+  std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+  ~ScopedTimer() { total += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(); }
+};
 
 bool Enabled() {
   static const bool enabled = std::getenv("RAYMAN_NATIVE_RENDER") != nullptr;
@@ -58,7 +86,58 @@ std::string SpirvDir() {
   return "../private/native/spirv_ubo";
 }
 
+// Pipeline persistence, next to the SPIR-V folder: the driver's cache and the
+// list of pipelines the game used, created up front on the next start.
+std::string PipelineCachePath() { return SpirvDir() + "/../pipeline_cache.bin"; }
+std::string PipelineListPath() { return SpirvDir() + "/../pipelines.txt"; }
+
+std::vector<uint8_t> ReadFile(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), {});
+}
+
+std::vector<native::Renderer::PipelineDesc> ReadPipelineList() {
+  std::vector<native::Renderer::PipelineDesc> out;
+  std::ifstream f(PipelineListPath());
+  unsigned long long vs, ps;
+  uint32_t blend, stride;
+  while (f >> std::hex >> vs >> ps >> blend >> std::dec >> stride) out.push_back({vs, ps, blend, stride});
+  return out;
+}
+
+// Game thread: grabs the data, writes the files on a background thread.
+void SavePipelines(native::Renderer* renderer) {
+  auto data = renderer->PipelineCacheData();
+  auto descs = renderer->PipelineDescs();
+  std::thread([data = std::move(data), descs = std::move(descs)] {
+    if (!data.empty()) {
+      std::string tmp = PipelineCachePath() + ".tmp";
+      if (FILE* f = std::fopen(tmp.c_str(), "wb")) {
+        std::fwrite(data.data(), 1, data.size(), f);
+        std::fclose(f);
+        std::rename(tmp.c_str(), PipelineCachePath().c_str());
+      }
+    }
+    std::string tmp = PipelineListPath() + ".tmp";
+    if (FILE* f = std::fopen(tmp.c_str(), "w")) {
+      for (auto& p : descs)
+        std::fprintf(f, "%016llx %016llx %x %u\n", (unsigned long long)p.vs, (unsigned long long)p.ps, p.blend, p.stride);
+      std::fclose(f);
+      std::rename(tmp.c_str(), PipelineListPath().c_str());
+    }
+  }).detach();
+}
+
 }  // namespace
+
+#if defined(__ANDROID__)
+#include <jni.h>
+// Settings dialog (RaymanActivity): applies on the next frame.
+extern "C" JNIEXPORT void JNICALL Java_io_github_belmantegu_raymanrecomp_RaymanActivity_nativeSetRenderScale(
+    JNIEnv*, jclass, jfloat scale) {
+  g_renderScale.store(scale, std::memory_order_relaxed);
+}
+#endif
 
 // Main thread, after the runtime is set up: creates the window and the renderer.
 void RaymanNativeRendererInit() {
@@ -99,8 +178,17 @@ void RaymanNativeRendererInit() {
     exts.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
     makeSurface = [](VkInstance instance) {
       VkAndroidSurfaceCreateInfoKHR info{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
-      info.window = static_cast<ANativeWindow*>(SDL_GetPointerProperty(
-          SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+      // Started behind the lock screen (or sent to the background right
+      // away), the activity has no surface yet and the property is null. A
+      // null window faults inside the driver, and the runtime's fault handler
+      // retries the access forever: wait for the window instead.
+      auto window = [] {
+        return static_cast<ANativeWindow*>(SDL_GetPointerProperty(
+            SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr));
+      };
+      if (!window()) NATIVE_LOG("native renderer: no window yet (app in the background), waiting");
+      while (!window()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      info.window = window();
       g_nativeWindow = info.window;
       // The game runs at 60 fps: ask for a 60 Hz display mode rather than 120.
       // ANativeWindow_setFrameRate is API 30+; look it up so API 29 still loads.
@@ -146,6 +234,7 @@ void RaymanNativeRendererInit() {
   auto* renderer = new native::Renderer();
   renderer->log = [](const char* stage) { NATIVE_LOG("native renderer: %s", stage); };
   g_makeSurface = makeSurface;
+  renderer->SetPipelineCacheData(ReadFile(PipelineCachePath()));
   bool ok = renderer->Init(loader, exts, makeSurface, uint32_t(w), uint32_t(h));
   if (!ok) {
     NATIVE_LOG("renderer init failed: %s", renderer->error().c_str());
@@ -191,7 +280,15 @@ void RaymanNativeRendererInit() {
       NATIVE_LOG("widescreen: aspect %.4f", aspect);
     }
   }
+  {
+    auto start = std::chrono::steady_clock::now();
+    auto known = ReadPipelineList();
+    uint32_t made = renderer->Prewarm(known);
+    NATIVE_LOG("pipelines: %u of %zu known created up front in %.0f ms", made, known.size(),
+               std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+  }
   g_renderer = renderer;
+  SDL_AddEventWatch(OnAppEvent, nullptr);
   NATIVE_LOG("native renderer ready (%dx%d), SPIR-V from %s", w, h, dir.c_str());
 }
 
@@ -210,6 +307,7 @@ void RaymanNativeRendererDraw(const native::DrawCall& call) {
     return;
   }
   std::lock_guard lock(g_mutex);
+  ScopedTimer timer{g_drawMs};
   OpenFrame();
   g_renderer->Draw(call);
 }
@@ -253,15 +351,22 @@ void RaymanNativeRendererPresent() {
 #if defined(__ANDROID__)
   // In the background SDL drops the window (the property goes null) and hands
   // out a new one when the app comes back: skip frames meanwhile, then build a
-  // surface and swapchain for the new window.
-  void* window = SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
-  if (!window) {
+  // surface and swapchain for the new window. Behind the lock screen or the
+  // notification shade the window can stay: hold the game there too.
+  auto currentWindow = [] {
+    return SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+  };
+  void* window = currentWindow();
+  if (!window || g_background) {
     g_renderer->DiscardFrame();
     g_frameOpen = false;
-    // Hold the game until the window is back: its logic advances once per
+    // Hold the game until it is visible again: its logic advances once per
     // presented frame, so it pauses instead of running unseen.
-    while (!SDL_GetPointerProperty(SDL_GetWindowProperties(g_window), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr))
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    NATIVE_LOG("native renderer: app in the background, game held");
+    while (g_background || !currentWindow()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    NATIVE_LOG("native renderer: back in the foreground");
+    g_lastPresent = std::chrono::steady_clock::now();
+    g_drawMs = 0;
     return;
   }
   if (window != g_nativeWindow) {
@@ -269,7 +374,16 @@ void RaymanNativeRendererPresent() {
     if (!g_renderer->Recreate(g_makeSurface)) NATIVE_LOG("recreate failed: %s", g_renderer->error().c_str());
   }
 #endif
-  if (g_renderer->stale() && !g_renderer->Recreate()) NATIVE_LOG("swapchain: %s", g_renderer->error().c_str());
+  if (g_renderer->stale()) {
+    NATIVE_LOG("native renderer: swapchain out of date, re-creating");
+    if (!g_renderer->Recreate()) NATIVE_LOG("swapchain: %s", g_renderer->error().c_str());
+  }
+  float scale = g_renderScale.load(std::memory_order_relaxed);
+  if (scale != g_renderer->renderScale()) {
+    g_renderer->SetRenderScale(scale);
+    NATIVE_LOG("render scale %.0f%% (%.0fx%.0f)", g_renderer->renderScale() * 100,
+               g_renderer->width() * g_renderer->renderScale(), g_renderer->height() * g_renderer->renderScale());
+  }
   g_renderer->EndFrame(shot ? &pixels : nullptr);
   g_frameOpen = false;
   if (shot && !pixels.empty()) {
@@ -283,8 +397,40 @@ void RaymanNativeRendererPresent() {
     }
     nextShot += interval;
   }
+  // Frame budget breakdown. Slow frames are logged with what they created, so
+  // hitches can be told apart: CPU in the draw hooks (decode, new pipelines),
+  // the end of the frame (recording, acquire), or waiting on the GPU.
+  auto now = std::chrono::steady_clock::now();
+  double frameMs = std::chrono::duration<double, std::milli>(now - g_lastPresent).count();
+  g_lastPresent = now;
+  auto& st = g_renderer->stats();
+  static double sumFrame = 0, sumDraw = 0, sumRecord = 0, sumWait = 0, worst = 0;
+  static uint32_t sumDraws = 0;
+  sumFrame += frameMs, sumDraw += g_drawMs, sumRecord += st.recordMs, sumWait += st.waitMs, sumDraws += st.draws;
+  worst = std::max(worst, frameMs);
+  if (frameMs > 20.0)
+    NATIVE_LOG("slow frame %.1f ms: draw hooks %.1f, end %.1f, gpu wait %.1f | %u draws, +%u pipelines, +%u textures, "
+               "%u re-uploads, %zu KB uploaded",
+               frameMs, g_drawMs, st.recordMs, st.waitMs, st.draws, st.newPipelines, st.newTextures, st.reuploads,
+               st.uploadBytes >> 10);
+  g_drawMs = 0;
+  // New pipelines since the last save: persist them (at most every 5 s).
+  static uint32_t savedPipelines = st.pipelines;
+  static auto lastSave = now;
+  if (st.pipelines != savedPipelines && now - lastSave > std::chrono::seconds(5)) {
+    SavePipelines(g_renderer);
+    savedPipelines = st.pipelines;
+    lastSave = now;
+  }
   static int frames = 0;
-  if (++frames % 300 == 0) {
+  if (++frames % 120 == 0) {
+    NATIVE_LOG("perf over 120 frames: %.1f fps, avg frame %.1f ms (draw hooks %.1f, end %.1f, gpu wait %.1f), "
+               "worst %.1f ms, %u draws/frame",
+               120000.0 / sumFrame, sumFrame / 120, sumDraw / 120, sumRecord / 120, sumWait / 120, worst, sumDraws / 120);
+    sumFrame = sumDraw = sumRecord = sumWait = worst = 0;
+    sumDraws = 0;
+  }
+  if (frames % 300 == 0) {
     auto& s = g_renderer->stats();
     NATIVE_LOG("native frame %d: %u draws, %u skipped, %u pipelines, %u textures", frames, s.draws, s.skipped,
                s.pipelines, s.textures);
