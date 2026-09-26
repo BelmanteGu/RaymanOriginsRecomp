@@ -8,6 +8,7 @@ Devices:
 |---|---|---|---|
 | Galaxy S23 (SM-S911B), Android 16 | Adreno 740 | 1.3 | main test device, 2340×1080, 120 Hz panel run at 60 Hz |
 | Redmi 10C (220333QL), Android 13 | Adreno 610 | **1.1** | low-end target: 3.7 GB RAM, 720×1650, 4× A73 + 4× A53 |
+| Galaxy A56 (SM-A566E), Android 16 | **Xclipse 540** | 1.3 | Exynos 1580, **not a Snapdragon**: Samsung's AMD RDNA-based GPU; mid-range, 1080×2340 |
 
 ## Summary
 
@@ -144,6 +145,8 @@ The game thread's CPU profile in a level (~130 draws per frame) had the renderer
 
 **Fix.** Two frames in flight. Each frame has its own vertex, index, constant and staging buffers, command buffers, fence, semaphores, texture heap set and constant set. `BeginFrame` only waits for the frame that used those resources last, two frames ago.
 
+**Result.** On the Galaxy A56 the GPU wait drops to **0.0 ms**: when a frame starts, the frame that used its resources has always finished.
+
 A new texture heap slot is written to the current frame's set right away, and to the other frame's set when that frame comes around. A descriptor set that a pending command buffer may read is never written, and no update-after-bind is needed (the Adreno 610 has none). Per-frame buffers are sized for what a frame uses now that only the used vertices and constants are copied: ~96 MB per frame, 192 MB in total, against 272 MB before for a single frame.
 
 ## 10. Pipeline hitches
@@ -151,6 +154,20 @@ A new texture heap slot is written to the current frame's set right away, and to
 **Finding.** Frames of 50–115 ms when a new effect or area appeared: pipelines are compiled the first time a combination of shaders, blend state and vertex stride is used, on the game thread.
 
 **Fix.** A `VkPipelineCache` loaded from `files/pipeline_cache.bin`, and the list of pipelines the game has used (`files/pipelines.txt`). All the listed pipelines are created at startup, and both files are saved (at most every 5 s) when new pipelines appear. From the second session on, a known pipeline costs nothing mid-game; a cache from another driver is rejected by the driver and the renderer starts empty.
+
+## Beyond Adreno: Galaxy A56 (Exynos 1580, Xclipse 540)
+
+Up to this pass the port had only run on Snapdragon phones (Adreno GPUs). The Galaxy A56 is an Exynos phone: its GPU, the Samsung Xclipse 540, is based on AMD's RDNA architecture, with Samsung's own Vulkan driver (1.3.279, driver 24.0.560). It is a mid-range phone, well below the S23.
+
+With all the fixes above and nothing specific to it, the game **runs very well** there: the first level at **60 fps**, with the correct picture (widescreen, touch controls).
+
+| Galaxy A56, in a level (~120 draws per frame) | |
+|---|---|
+| Frame rate | **60 fps** |
+| Renderer CPU per frame (draw hooks + end) | 0.5–1.0 ms |
+| GPU wait | **0.0 ms**: with two frames in flight the game thread never waits for the GPU |
+
+This is also the first run of fix 9 (two frames in flight) on a device, and of the renderer on a non-Adreno driver.
 
 ## Render resolution
 
@@ -160,6 +177,7 @@ On the S23, before fix 1: 45 fps at 100%, **57–60 fps at 50–67%**. After fix
 
 ## Still open
 
-- Thermal behaviour over long sessions, and the GPU cost at full resolution on low-end devices (Redmi 10C).
+- The Redmi 10C (Adreno 610, Vulkan 1.1): the renderer's Vulkan 1.1 path is built for it and its SPIR-V validates, but it hasn't run on the device yet.
+- Thermal behaviour over long sessions, and the GPU cost at full resolution on low-end devices.
 - Texture decoding for new textures still runs on the game thread (loading screens).
 - The rest of the game thread is the recompiled game code itself, spread over thousands of functions, the largest at 1.7%.

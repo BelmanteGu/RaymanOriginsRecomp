@@ -2,7 +2,7 @@
 
 Status: **the APK builds.** It runs the recompiled game natively on ARM64 with the ReXGlue runtime (kernel, XMA audio, input, files). Graphics still go through ReXGlue's Xenos GPU emulation over Vulkan, which is heavy. The native renderer (docs/PROGRESS.md section 7) replaces it later. The APK has not been run on a device yet.
 
-Target: arm64-v8a, Android 10 (API 29) or newer, Vulkan 1.1. Tested build host: macOS on Apple Silicon.
+Target: arm64-v8a, Android 10 (API 29) or newer, Vulkan 1.1. Tested build hosts: macOS on Apple Silicon, Windows 11.
 
 ## Requirements
 
@@ -90,6 +90,10 @@ Left idle, the game plays its pre-rendered attract video (`rolling_demo.wmv`), s
 <img src="media/android-s23-demo-video.jpg" alt="Attract-mode video playing on a Galaxy S23" width="480">
 
 Graphics still go through the Xenos emulation, and performance hasn't been measured.
+
+## Also tested: Galaxy A56 (Exynos, not Snapdragon)
+
+The Galaxy A56 (Exynos 1580) has no Adreno GPU: its Samsung **Xclipse 540** is based on AMD's RDNA architecture, with Samsung's own Vulkan driver. The game runs very well on it with nothing specific to it: the first level at **60 fps**, correct picture, and the renderer never waits for the GPU (two frames in flight). It is the first non-Snapdragon phone the port has run on. Details in [ANDROID_PERFORMANCE.md](ANDROID_PERFORMANCE.md#beyond-adreno-galaxy-a56-exynos-1580-xclipse-540).
 
 ## Performance
 
