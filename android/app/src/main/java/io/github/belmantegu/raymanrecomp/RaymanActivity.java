@@ -89,9 +89,27 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
     }
 
     static final String KEY_NATIVE = "native_renderer";
+    /** Render resolution, percent of the screen (native renderer), 50..100. */
+    static final String KEY_RENDER_SCALE = "render_scale";
+    static final int MIN_RENDER_SCALE = 50;
+
+    /** Native renderer (rex/src/native_renderer.cpp): applies on the next frame. */
+    static native void nativeSetRenderScale(float scale);
 
     private boolean nativeRenderer(SharedPreferences prefs) {
         return prefs.getBoolean(KEY_NATIVE, true);
+    }
+
+    private int renderScale(SharedPreferences prefs) {
+        return Math.max(MIN_RENDER_SCALE, Math.min(100, prefs.getInt(KEY_RENDER_SCALE, 100)));
+    }
+
+    /** "75% (1755 x 810)": the resolution the game is drawn at. */
+    private String renderScaleLabel(int percent) {
+        DisplayMetrics m = getResources().getDisplayMetrics();
+        int w = Math.max(m.widthPixels, m.heightPixels), h = Math.min(m.widthPixels, m.heightPixels);
+        return getString(R.string.render_scale) + ": " + percent + "% (" + (w * percent / 100) + " x "
+            + (h * percent / 100) + ")";
     }
 
     /** Width of a 720-line video mode with the display's aspect ratio. */
@@ -108,11 +126,17 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
         // to be set before SDLActivity loads them.
         SharedPreferences prefs = getSharedPreferences(TouchControls.PREFS, MODE_PRIVATE);
         try {
+            // SDL3 on Android: SDL_WaitEvent pushes a poll sentinel on every
+            // pass, every pushed event wakes the Android event wait, so the
+            // runtime's UI loop spun on a whole core. The sentinel only matters
+            // to SDL_PollEvent loops; turn it off (docs/ANDROID_PERFORMANCE.md).
+            Os.setenv("SDL_POLL_SENTINEL", "0", true);
             if (nativeRenderer(prefs)) {
                 Os.setenv("RAYMAN_NATIVE_RENDER", "main", true);
                 Os.setenv("RAYMAN_NATIVE_SPIRV", new File(getExternalFilesDir(null), "spirv").getPath(), true);
                 // Native widescreen: the game frames the display's aspect ratio.
                 Os.setenv("RAYMAN_WIDESCREEN", String.valueOf(wideWidth() / 720f), true);
+                Os.setenv("RAYMAN_RENDER_SCALE", String.valueOf(renderScale(prefs) / 100f), true);
             } else {
                 Os.unsetenv("RAYMAN_NATIVE_RENDER");
             }
@@ -179,6 +203,35 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
         nativeBox.setChecked(nativeBefore);
         box.addView(nativeBox);
 
+        // Render resolution: previewed live while sliding (the game is behind
+        // the dialog), kept on OK, restored on cancel.
+        final int scaleBefore = renderScale(prefs);
+        final TextView scaleTitle = new TextView(this);
+        scaleTitle.setText(renderScaleLabel(scaleBefore));
+        scaleTitle.setPadding(0, scaleTitle.getPaddingTop() + 16, 0, 0);
+        final SeekBar scale = new SeekBar(this);
+        scale.setMax(100 - MIN_RENDER_SCALE);
+        scale.setProgress(scaleBefore - MIN_RENDER_SCALE);
+        scale.setEnabled(nativeBefore);
+        scale.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                int percent = progress + MIN_RENDER_SCALE;
+                scaleTitle.setText(renderScaleLabel(percent));
+                if (nativeBefore) {
+                    nativeSetRenderScale(percent / 100f);
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        box.addView(scaleTitle);
+        box.addView(scale);
+
         new AlertDialog.Builder(this)
             .setTitle(R.string.settings_title)
             .setView(box)
@@ -189,6 +242,7 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
                     .putInt(TouchControls.KEY_SCALE, size.getProgress() + 60)
                     .putBoolean(TouchControls.KEY_FILL, fill.isChecked())
                     .putBoolean(KEY_NATIVE, nativeBox.isChecked())
+                    .putInt(KEY_RENDER_SCALE, scale.getProgress() + MIN_RENDER_SCALE)
                     .apply();
                 touchControls.applyPreferences();
                 if (fill.isChecked() != fillBefore || nativeBox.isChecked() != nativeBefore) {
@@ -198,7 +252,16 @@ public class RaymanActivity extends SDLActivity implements TouchControls.Setting
                         .show();
                 }
             })
-            .setNegativeButton(android.R.string.cancel, null)
+            .setNegativeButton(android.R.string.cancel, (dialog, which) -> {
+                if (nativeBefore) {
+                    nativeSetRenderScale(scaleBefore / 100f);
+                }
+            })
+            .setOnCancelListener(dialog -> {
+                if (nativeBefore) {
+                    nativeSetRenderScale(scaleBefore / 100f);
+                }
+            })
             .setNeutralButton(R.string.home_screen, (dialog, which) ->
                 startActivity(new Intent(this, LauncherActivity.class)
                     .putExtra(LauncherActivity.EXTRA_HOME, true)))
