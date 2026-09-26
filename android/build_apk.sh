@@ -20,7 +20,8 @@ LIBS=$A/app/libs/arm64-v8a
 mkdir -p "$LIBS"
 cp "$BUILD/librayman.so" "$LIBS/"
 cp "$REXSDK/lib/librexruntime.so" "$REXSDK/lib/librexgpu-xenos.so" "$REXSDK/lib/librexgpu-null.so" "$LIBS/"
-cp "$NDK/toolchains/llvm/prebuilt/darwin-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$LIBS/"
+PREBUILT=$(ls -d "$NDK"/toolchains/llvm/prebuilt/*/ | head -n 1)
+cp "$PREBUILT/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" "$LIBS/"
 
 # Game-derived files packed into this local APK (never committed, never
 # published): the SPIR-V shaders from tools/native_renderer/build_spirv.sh and

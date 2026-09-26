@@ -40,7 +40,8 @@ import java.util.zip.ZipInputStream;
 /**
  * Home screen: game file status, PLAY, and importing the player's own copy of
  * Rayman Origins (Xbox 360) into the app: a folder with default.xex and the
- * .ipk bundles, or a .zip of it. Nothing from the game ships with the app.
+ * .ipk bundles, or a .zip of it (tools/make_game_pack.py makes one from your
+ * files). Nothing from the game ships with the app.
  *
  * Optional art (a personal build's assets/launcher/background.jpg and
  * logo.png, see android/build_apk.sh) replaces the default look.
@@ -128,11 +129,13 @@ public class LauncherActivity extends Activity {
         play.setOnClickListener(v -> startGame());
         column.addView(play, buttonParams());
 
-        Button change = pillButton("Change game files", false);
-        change.setOnClickListener(v -> pick(PICK_FOLDER));
-        LinearLayout.LayoutParams changeParams = buttonParams();
-        changeParams.topMargin = (int) dp(12);
-        column.addView(change, changeParams);
+        // A game pack (.zip, see tools/make_game_pack.py) is the one-file way
+        // to bring your copy to a device; a folder works too.
+        Button importPack = pillButton("Import game pack (.zip)", false);
+        importPack.setOnClickListener(v -> pick(PICK_ZIP));
+        LinearLayout.LayoutParams importParams = buttonParams();
+        importParams.topMargin = (int) dp(12);
+        column.addView(importPack, importParams);
 
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setVisibility(View.GONE);
@@ -140,7 +143,7 @@ public class LauncherActivity extends Activity {
 
         LinearLayout links = new LinearLayout(this);
         links.setPadding(0, (int) dp(14), 0, 0);
-        links.addView(link("Import .zip", v -> pick(PICK_ZIP)));
+        links.addView(link("Game folder", v -> pick(PICK_FOLDER)));
         links.addView(text("  ·  ", 15, 0x99FFFFFF, false));
         links.addView(link("Import saves", v -> pick(PICK_SAVES)));
         links.addView(text("  ·  ", 15, 0x99FFFFFF, false));
@@ -245,6 +248,8 @@ public class LauncherActivity extends Activity {
                     new AlertDialog.Builder(this)
                             .setMessage("default.xex or bootsequence_X360.ipk not found. Pick the folder that contains the game's files.")
                             .setPositiveButton(android.R.string.ok, null).show();
+                } else if (request != PICK_SAVES) {
+                    startGame();  // game files in place: straight into the game
                 }
             });
         }).start();
@@ -284,6 +289,24 @@ public class LauncherActivity extends Activity {
 
     private void unzip(Uri zip, File dest) throws IOException {
         long copied = 0;
+        // The pack's size drives the progress bar (stored entries: about the
+        // same as what gets extracted).
+        long total = 0;
+        try (android.database.Cursor c = getContentResolver().query(
+                zip, new String[] {android.provider.OpenableColumns.SIZE}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) total = c.getLong(0);
+        }
+        final long size = total;
+        if (size > 0) {
+            if (size > dest.getParentFile().getUsableSpace()) {
+                throw new IOException("not enough free space: " + (size >> 20) + " MB needed, "
+                        + (dest.getParentFile().getUsableSpace() >> 20) + " MB free");
+            }
+            runOnUiThread(() -> {
+                progress.setIndeterminate(false);
+                progress.setMax(1000);
+            });
+        }
         try (ZipInputStream in = new ZipInputStream(getContentResolver().openInputStream(zip))) {
             ZipEntry e;
             while ((e = in.getNextEntry()) != null) {
@@ -296,7 +319,14 @@ public class LauncherActivity extends Activity {
                 try (OutputStream o = new FileOutputStream(out)) {
                     copied += copy(in, o);
                 }
-                setStatus("Extracting " + out.getName() + "  (" + (copied >> 20) + " MB)");
+                final int permille = size > 0 ? (int) Math.min(1000, copied * 1000 / size) : 0;
+                final String line = size > 0
+                        ? "Extracting…  " + (copied >> 20) + " / " + (size >> 20) + " MB  (" + permille / 10 + "%)"
+                        : "Extracting " + out.getName() + "  (" + (copied >> 20) + " MB)";
+                runOnUiThread(() -> {
+                    status.setText(line);
+                    if (size > 0) progress.setProgress(permille);
+                });
             }
         }
         // If everything landed in one subfolder, move it up.
