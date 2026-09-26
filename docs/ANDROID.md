@@ -20,6 +20,7 @@ ReXGlue has no Android build upstream. `android/rexglue-patches/` holds our patc
 - AArch64 fiber switching (Bionic has no `getcontext`/`swapcontext`). This is required, because every guest thread converts to a fiber.
 - Shims for NDK libc++ gaps (floating-point `from_chars`, `clock_cast`, `jthread`) and for Bionic (no robust mutexes).
 - The runtime locates its GPU plugin next to its own library (`dladdr`), since `/proc/self/exe` is the zygote.
+- Performance (0005, 0006, see [ANDROID_PERFORMANCE.md](ANDROID_PERFORMANCE.md)): guest memory commits use `mprotect` instead of parsing `/proc/self/maps`, and `WaitMultiple` sleeps instead of polling.
 
 ```sh
 git clone --recurse-submodules --branch v0.10.0 https://github.com/rexglue/rexglue-sdk.git tools/forks/rexglue-src
@@ -58,7 +59,13 @@ On Android the game is `librayman.so`. `SDLActivity` loads it and calls `SDL_mai
 sh android/build_apk.sh          # android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+On a Windows host, run it from Git Bash; for step 2 pass the Windows SDK's `tools/rexglue/win-amd64/bin/rexglue.exe` as `REXGLUE_HOST_TOOL`. Git on Windows checks out the submodules' symlinks as small text files, which breaks the ReXGlue build with errors like `expected identifier` in a file that only contains a path: replace each one with a copy of its target.
+
 ## 4. Install and copy your game
+
+**One file to carry:** `python tools/make_game_pack.py` packs your `private/game` into `private/dist/RaymanOrigins-game.zip` (stored, Zip64). Copy it to the device, open the app and tap **Import game pack (.zip)**: it extracts with a progress bar and starts the game. The pack is your copy of the game: keep it to yourself. The game is over 4 GB, so it can't go inside the APK, which is limited to Zip32.
+
+With adb instead:
 
 ```sh
 G=/sdcard/Android/data/io.github.belmantegu.raymanrecomp/files/game
@@ -83,6 +90,10 @@ Left idle, the game plays its pre-rendered attract video (`rolling_demo.wmv`), s
 <img src="media/android-s23-demo-video.jpg" alt="Attract-mode video playing on a Galaxy S23" width="480">
 
 Graphics still go through the Xenos emulation, and performance hasn't been measured.
+
+## Performance
+
+[ANDROID_PERFORMANCE.md](ANDROID_PERFORMANCE.md) has the profiling pass on the Galaxy S23 and the Redmi 10C: what cost the frame rate, how it was measured and what fixed it. Levels went from 43–46 to 60 fps at full resolution. **Settings → Resolution** (50–100%) lowers the render resolution for weaker GPUs.
 
 ## Controls
 
